@@ -1,0 +1,4195 @@
+// -*- c++ -*-
+#ifndef CELLFLIP_VVH
+#define CELLFLIP_VVH
+
+/**
+ * \file cellflips.vvh
+ * This files include the definition of the \f$nD\f$-cell complex.
+ */
+
+#include "cellflips_utils.h"
+#include "cellflipslayer.h"
+#include "chain.h"
+
+#include <initializer_list>
+
+/**
+ * \defgroup internal Internal classes, not for general use
+ * \defgroup utility Utility classes, not the main API, but may be useful
+ * \defgroup main Main API classes, the user must know about them
+ */
+
+/**
+ * \namespace ndcomplex
+ * Namespace containing all the definitions to work with an \f$nD\f$-cell complex
+ */
+namespace ndcomplex
+{
+// Useful macros for types
+  //#define TEMPLATE_CELL_COMPLEX int _N, typename CellContent, typename LayerComplex
+#define TEMPLATE_CELL_COMPLEX typename VertexContent, typename... CellContents
+  //#define CELL_COMPLEX_ARGS _N,CellContent,LayerComplex
+#define CELL_COMPLEX_ARGS VertexContent, CellContents...
+#define CELL_FLIP(N1,Cplx) CellFlip<N1,typename ndcomplex::NTypes<N1,Cplx>::cell_content_t, typename ndcomplex::NTypes<N1-1,Cplx>::cell_content_t, typename ndcomplex::NTypes<N1-2,Cplx>::cell_content_t>
+#define CELL_TYPE(N1,Cplx) Cell<N1,typename ndcomplex::NTypes<N1,Cplx>::cell_content_t>
+
+  //#define DEBUG_OUTPUT 1
+#ifdef DEBUG_OUTPUT
+#  define DEBUG_OUT(ss) out << ss
+#else
+#  define DEBUG_OUT(ss)
+#endif
+
+  /**
+   * \ingroup main
+   * \class CellComplex
+   * Class representing the whole cell complex.
+   *
+   * This is the main class for the cell complex.
+   * It contains an instance of the layer, starting from a special one for the top cell.
+   */
+  template <TEMPLATE_CELL_COMPLEX>
+  struct CellComplex
+  {
+    enum {
+      N = sizeof...(CellContents) ///< Dimension of the cell complex
+    };
+
+    typedef typename LayerConstructor<VertexContent,CellContents...>::type layers_t;
+
+    /// This class
+    typedef CellComplex Self;
+
+    /// Type of the top layer complex
+    typedef typename ComplexNthLayer<N+1,Self>::type top_complex_t;
+    /// Type of the main layer complex, i.e. for the N-cells
+    typedef typename ComplexNthLayer<N,Self>::type main_layer_complex_t;
+    /// Type used to count
+    typedef typename top_complex_t::size_type size_type;
+
+    /**
+     * This class is here to quickly retrieve the type of any ncell and associated types (i.e. oriented cell and flip)
+     */
+    template <int N1>
+    struct ncell_t
+    {
+      /// Type of the cell of dimension N1
+      typedef typename NTypes<N1,Self>::cell_t cell_t;
+      /// Type of the oriented cell of dimension N1
+      typedef typename NTypes<N1,Self>::oriented_cell_t oriented_cell_t;
+      /// Type of the cell flip of dimension N1
+      typedef typename NTypes<N1,Self>::cell_flip_t cell_flip_t;
+      /// Type of the range of cells of dimension N1
+      typedef typename NTypes<N1,Self>::cell_range cell_range;
+    };
+
+    /**
+     * Result of splitting a cell in two
+     */
+    template <int N1>
+    struct SplitResult
+    {
+      /// Type of the cell begin split
+      typedef typename ncell_t<N1>::cell_t cell_t;
+      /// Type of the face of the cell
+      typedef typename ncell_t<N1-1>::cell_t face_t;
+
+      /// Creates an invalid split result
+      SplitResult()
+        : left(0)
+        , right(0)
+        , membrane(0)
+      { }
+
+      /// Creates an initialized split result
+      SplitResult(const cell_t& c1,
+                  const cell_t& c2,
+                  const face_t& f)
+        : left(c1)
+        , right(c2)
+        , membrane(f)
+      { }
+
+      /// Returns true if valid (i.e. all elements are non-null)
+      explicit operator bool() { return left and right; }
+
+      cell_t left; ///< Cell on the "left", i.e. containing <tt>+membrane</tt>
+      cell_t right; ///< Cell on the "right", i.e. containing <tt>-membrane</tt>
+      face_t membrane; ///< Membrane between the two new cells
+    };
+
+    ///\name Cell types
+    //@{
+    /// Type of the top cell
+    typedef typename top_complex_t::cell_t top_t;
+    /// Type of a N-cell
+    typedef typename main_layer_complex_t::cell_t cell_t;
+    /// Type of a N-1-cell
+    typedef typename main_layer_complex_t::face_t face_t;
+    /// Type of a 1-cell
+    typedef typename ncell_t<1>::cell_t edge_t;
+    /// Type of a 0-cell
+    typedef typename ncell_t<0>::cell_t vertex_t;
+    /// Type of the bottom cell
+    typedef typename ncell_t<-1>::cell_t bottom_t;
+
+    /// Type of an oriented N-cell
+    typedef typename cell_t::oriented_cell_t oriented_cell_t;
+    /// Type of an oriented N-1-cell
+    typedef typename face_t::oriented_cell_t oriented_face_t;
+    /// Type of an oriented 1-cell
+    typedef typename ncell_t<1>::oriented_cell_t oriented_edge_t;
+    /// Type of an oriented 0-cell
+    typedef typename ncell_t<0>::oriented_cell_t oriented_vertex_t;
+    //@}
+
+    ///\name Flips types
+    //@{
+    /// Type of a N-flip
+    typedef typename main_layer_complex_t::cell_flip_t cell_flip_t;
+
+    /// Type of a N+1-flip
+    typedef typename top_complex_t::cell_flip_t top_cell_flip_t;
+    //@}
+
+    /// The top cell
+    static const top_t T;
+    /// The bottom cell
+    static const bottom_t _;
+
+    /**
+     * Instance of query type
+     */
+    QueryType Q;
+
+    /**
+     * \enum ErrorCodes List of error codes
+     */
+    enum ErrorCodes
+      {
+        NO_ERROR = 0, ///< No error
+        BAD_BOUNDARY, ///< Provided an invalid boundary
+        CELL_ALREADY_IN_COMPLEX, ///< Try to add a cell already in the cell complex
+        NO_SUCH_FLIP, ///< Trying to find a flip not in the cell complex
+        NO_SUCH_FACE, ///< Trying to access a face not in the cell complex
+        NO_SUCH_CELL, ///< Trying to access a cell not in the cell complex
+        DUPLICATE_FLIPS, ///< Trying to insert a flip already in the cell complex
+        CANNOT_INSERT_FLIP, ///< Failed to insert a flip
+        ORIENTATION_OF_UNRELATED_CELLS, ///< Trying to get the orientation of unrelated cells
+        UNKNOWN_CELL_ORIENTATION, ///< Trying to access/remove an orientation that is now known
+        WRONG_BOUNDARY, ///< Trying to use an invalid boudary
+        WRONG_BOUNDARY_ORIENTATION, ///< Trying to use a boundary with inconsistent orientation
+        WRONG_CELL_ORIENTATION, ///< Trying to use a cell badly oriented
+        CELL_BOUNDARY_NOT_CLOSED, ///< Trying to use a non-closed boundary for a cell
+        CELL_BOUNDARY_SELF_INTERSECT, ///< Trying to use a self-intersecting boundary for a cell
+        CELL_BOUNDARY_MULTIPLE_PARTS, ///< Trying to use a boundary broken into multiple disconnected parts for a cell
+        MEMBRANE_NOT_IN_CELL, ///< Trying to divide a cell with a membrane not contained in the cell
+        MEMBRANE_DOESNT_CUT_CELL_IN_TWO, ///< Trying to divide a cell with a membrane that cut the cell in more than two
+        FACE_ALREADY_BETWEEN_CELLS, ///< Indicate a face given to define a n-cell is already the interface between two existing cells
+        CELL_IS_A_FACE, ///< Indicate you are trying to use a cell that is used as face
+        CHAIN_CONNECTED_INSIDE, ///< Indicate you are trying to use a chain with element connected to the rest of the complex inside the chain
+        STRUCTURE_INVALID ///< General error after which the structure is invalid and should not be used anymore
+      };
+    /**
+     * Current error code
+     */
+    mutable ErrorCodes error;
+
+    /**
+     * Translate the error code into a human-readable string
+     */
+    QString errorString() const
+    {
+      switch(error)
+        {
+        case NO_ERROR:
+          return "No error";
+        case BAD_BOUNDARY:
+          return "Bad boudary";
+        case CELL_ALREADY_IN_COMPLEX:
+          return "Trying to insert a cell that is already in the cell complex";
+        case NO_SUCH_FLIP:
+          return "The flip was not found";
+        case NO_SUCH_FACE:
+          return "The face was not found";
+        case NO_SUCH_CELL:
+          return "The cell was not found";
+        case DUPLICATE_FLIPS:
+          return "The same flip is stored many times";
+        case CANNOT_INSERT_FLIP:
+          return "Cannot insert flip in flip lists";
+        case ORIENTATION_OF_UNRELATED_CELLS:
+          return "Trying to get the relative orientation of unrelated cells.";
+        case UNKNOWN_CELL_ORIENTATION:
+          return "Trying to access/remove an orientation that is now known.";
+        case WRONG_BOUNDARY:
+          return "The specified boundary is incorrect.";
+        case WRONG_BOUNDARY_ORIENTATION:
+          return "Trying to add a cell with badly oriented boundary";
+        case WRONG_CELL_ORIENTATION:
+          return "The cell has an orientation incompatible with the others";
+        case CELL_BOUNDARY_NOT_CLOSED:
+          return "Specified a boundary that is not closed.";
+        case CELL_BOUNDARY_SELF_INTERSECT:
+          return "Specified a boundary that self-intersect.";
+        case CELL_BOUNDARY_MULTIPLE_PARTS:
+          return "Specified a boundary is in multiple parts";
+        case STRUCTURE_INVALID:
+          return "The structure doesn't represent anymore a cell complex for a N-manifold";
+        case MEMBRANE_NOT_IN_CELL:
+          return "The membrane is not part of the cell.";
+        case MEMBRANE_DOESNT_CUT_CELL_IN_TWO:
+          return "The membrane doesn't cut the cell in two parts.";
+        case FACE_ALREADY_BETWEEN_CELLS:
+          return "A face is already an interface between to N-cells, and cannot be added to a third one.";
+        case CELL_IS_A_FACE:
+          return "The cell is the face of some other cell and cannot be used in this context.";
+        case CHAIN_CONNECTED_INSIDE:
+          return "The chain is connected to the rest of the cell complex with element not on its boundary.";
+        default:
+          return "Unknown error";
+        }
+    }
+
+    /**
+     * Creates a new, empty cell complex
+     */
+    CellComplex()
+      : error(NO_ERROR)
+    {
+      get_layer<-1>(*this).setBottom(_);
+      get_layer<0>(*this).setBottom(_);
+    }
+
+    /**
+     * Instanciate the data structure, starting from the top cell
+     */
+    layers_t _layers;
+
+    /**
+     * Remove all element from all dimensions
+     */
+    void clear()
+    {
+      _clear<N+1>();
+    }
+
+  protected:
+
+    template <int N1>
+    void _clear(const true_type&)
+    {
+      get_layer<N1>(*this).clear();
+      _clear<N1-1>();
+    }
+
+    template <int N1>
+    void _clear(const false_type&)
+    {
+    }
+
+    template <int N1>
+    void _clear()
+    {
+      _clear<N1>(typename test_type<(N1>=0)>::type());
+    }
+
+  public:
+
+    ///\name Cells lookup
+    //@{
+    /**
+     * Return the list of N1-cells
+     */
+    template <int N1>
+    typename ncell_t<N1>::cell_range cells() const
+    {
+      return get_layer<N1>(*this).cells();
+    }
+
+    /**
+     * Return the list of N-cells
+     */
+    typename ncell_t<N>::cell_range cells() const
+    {
+      return cells<N>();
+    }
+
+    /**
+     * Return the list of N-1-cells (i.e. faces)
+     */
+    typename ncell_t<N-1>::cell_range faces() const
+    {
+      return cells<N-1>();
+    }
+
+    /**
+     * Return the list of 1-cells (i.e. edges)
+     */
+    typename ncell_t<1>::cell_range edges() const
+    {
+      return cells<1>();
+    }
+
+    /**
+     * Return the list of 0-cells (i.e. vertices)
+     */
+    typename ncell_t<0>::cell_range vertices() const
+    {
+      return cells<0>();
+    }
+
+    /**
+     * Return a N1-cell
+     */
+    template <int N1>
+    typename ncell_t<N1>::cell_t any() const
+    {
+      return get_layer<N1>(*this).any();
+    }
+
+    /**
+     * Return a N-Cell
+     */
+    cell_t anyCell() const { return any<N>(); }
+
+    /**
+     * Return a N-1-Cell
+     */
+    face_t anyFace() const { return any<N-1>(); }
+
+    /**
+     * Return a 1-Cell
+     */
+    edge_t anyEdge() const { return any<1>(); }
+
+    /**
+     * Return a 0-Cell
+     */
+    vertex_t anyVertex() const { return any<0>(); }
+
+    //@}
+    ///\name Number of cells
+    //@{
+
+    /**
+     * Check if there are any cells in the cell complex.
+     *
+     * It is equivalent to call \c empty<0>().
+     *
+     * \note Due to the recursive nature, it is sufficient to test if there is any vertex.
+     */
+    bool empty() const
+    {
+      return empty<0>();
+    }
+
+    /**
+     * Check if there is any cell of dimension N1
+     */
+    template <int N1>
+    bool empty() const
+    {
+      return get_layer<N1>(*this).empty();
+    }
+
+
+    /**
+     * Return the number of N1-cells
+     */
+    template <int N1>
+    size_type nbCells() const
+    {
+      return get_layer<N1>(*this).nbCells();
+    }
+
+    /**
+     * Return the number of N-cells
+     */
+    size_type nbCells() const
+    {
+      return nbCells<N>();
+    }
+
+    /**
+     * Return the number of (N-1)-cells
+     */
+    size_type nbFaces() const
+    {
+      return nbCells<N-1>();
+    }
+
+    /**
+     * Return the number of 1-cells
+     */
+    size_type nbEdges() const
+    {
+      return nbCells<1>();
+    }
+
+    /**
+     * Return the number of 0-cells
+     */
+    size_type nbVertices() const
+    {
+      return nbCells<0>();
+    }
+    //@}
+    ///\name Cell queries
+    //@{
+
+    /**
+     * Check the N1-cell exists
+     */
+    template <int N1>
+    bool hasCell(const CELL_TYPE(N1,Self)& cell) const
+    {
+      return get_layer<N1>(*this).hasCell(cell);
+    }
+
+    /**
+     * Check if the N-1-cell exist
+     */
+    bool hasFace(const face_t& c) const
+    {
+      return hasCell<N-1>(c);
+    }
+
+    /**
+     * Check if the 1-cell exist
+     */
+    bool hasEdge(const edge_t& c) const
+    {
+      return hasCell<1>(c);
+    }
+
+    /**
+     * Check if the 0-cell exist
+     */
+    bool hasVertex(const vertex_t& c) const
+    {
+      return hasCell<0>(c);
+    }
+
+    /**
+     * Check if the N-cell exist
+     */
+    bool hasCell(const cell_t& c) const
+    {
+      return hasCell<N>(c);
+    }
+
+    /**
+     * Check the N1-cell exists
+     */
+    template <int N1>
+    bool contains(const Cell<N1,typename NTypes<N1,Self>::cell_content_t>& cell) const
+    {
+      return hasCell(cell);
+    }
+
+    /// Get the edge between \c v1 and \c v2, if it exist
+    edge_t edge(const vertex_t& v1, const vertex_t& v2) const
+    {
+      typedef typename ncell_t<1>::cell_flip_t l_cell_flip_t;
+      std::set<l_cell_flip_t*> matches = match(Q, v1, v2, Q);
+      if(!matches.empty())
+        return (*matches.begin())->cell;
+      return edge_t::null;
+    }
+
+    //@}
+
+    ///\name Unordered flips lookup
+    //@{
+
+    /**
+     * Flip the triplet \c cell, \c face, \c joint.
+     *
+     * Find the flip matching \c {cell,face,Q,joint} and return what \c Q matched.
+     */
+    template <int N1>
+    typename ncell_t<N1-1>::cell_t flip(const CELL_TYPE(N1,Self)& cell,
+                                        const typename ncell_t<N1-1>::cell_t& face,
+                                        const typename ncell_t<N1-2>::cell_t& joint) const
+    {
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      l_cell_flip_t *res = get_layer<N1>(*this).flip(cell, face, joint);
+      if(res)
+        return res->otherFace(face);
+      return l_face_t::null;
+    }
+
+    /**
+     * Retrieve the set of flips in which \c cell is a cell
+     */
+    template <int N1>
+    const std::set<CELL_FLIP(N1,Self)*>&
+    flipsFromCell(const CELL_TYPE(N1,Self)& cell) const
+    {
+      STATIC_ASSERT(N1>0 and N1<=N+1, "Cell flips exist only for cells of dimension at least 1 and at most N+1.");
+      typedef typename ComplexNthLayer<N1,Self>::type LayerType;
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      static const std::set<l_cell_flip_t*> empty = std::set<l_cell_flip_t*>();
+      const LayerType& layer = get_layer<N1>(*this);
+      auto found = layer.cell_access.find(cell);
+      if(found != layer.cell_access.end())
+        return found->second;
+      return empty;
+    }
+
+    /**
+     * Retrieve the set of flips in which \c cell is a face
+     */
+    template <int N1>
+    const std::set<CELL_FLIP(N1+1,Self)*>&
+    flipsFromFace(const CELL_TYPE(N1,Self)& cell) const
+    {
+      STATIC_ASSERT(N1>-1 and N1 <= N, "Face flips exist only for cells of dimension at least 0 and at most N.");
+      typedef ComplexNthLayer<N1+1,Self> ComplexLayerType;
+      typedef typename ComplexLayerType::type LayerType;
+      typedef typename LayerType::cell_flip_t l_cell_flip_t;
+      static const std::set<l_cell_flip_t*> empty = std::set<l_cell_flip_t*>();
+      const LayerType& layer = get_layer<N1+1>(*this);
+      auto found = layer.face_access.find(cell);
+      if(found != layer.face_access.end())
+        return found->second;
+      return empty;
+    }
+
+    /**
+     * Retrieve the set of flips in which \c cell is a joint
+     */
+    template <int N1>
+    const std::set<CELL_FLIP(N1+2,Self)*>&
+    flipsFromJoint(const CELL_TYPE(N1,Self)& cell) const
+    {
+      STATIC_ASSERT(N1>-2 and N1 < N, "Joint flips exist only for cells of dimension at least -1 and at most N-1.");
+      typedef ComplexNthLayer<N1+2,Self> ComplexLayerType;
+      typedef typename ComplexLayerType::type LayerType;
+      typedef typename LayerType::cell_flip_t l_cell_flip_t;
+      static const std::set<l_cell_flip_t*> empty = std::set<l_cell_flip_t*>();
+      const LayerType& layer = get_layer<N1+2>(*this);
+      auto found = layer.joint_access.find(cell);
+      if(found != layer.joint_access.end())
+        return found->second;
+      return empty;
+    }
+
+    /**
+     * Find the subset of cell flips matching the flip given from the \c lst argument.
+     */
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_FLIP(N1,Self)& flip,
+          const std::set<CELL_FLIP(N1,Self)*>& lst) const
+    {
+      STATIC_ASSERT(N1>0 and N1 <= N+1, "Cell flips exists only for dimensions from 1 to N+1.");
+      typedef typename ComplexNthLayer<N1,Self>::type LayerType;
+      typedef typename LayerType::cell_flip_t l_cell_flip_t;
+      std::set<l_cell_flip_t*> flips;
+      forall l_cell_flip_t* pf in lst:
+        if(ndcomplex::match(flip,*pf))
+          flips.insert(pf);
+      return flips;
+    }
+
+    /**
+     * Find the subset of cell flips matching the flip given from the flips in the cell complex.
+     */
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_FLIP(N1,Self)& flip) const
+    {
+      return match(flip.cell, flip.face1, flip.face2, flip.joint);
+      /*
+        STATIC_ASSERT(N1>0);
+        typedef typename ComplexNthLayer<N1,Self>::type LayerType;
+        typedef typename LayerType::cell_flip_t cell_flip_t;
+        const LayerType& layer = ComplexNthLayer<N1,Self>::value(*this);
+        if(flip.joint)
+        {
+        auto found = layer.joint_access.find(flip.joint);
+        if(found != layer.joint_access.end())
+        return match(flip, found->second);
+        return std::set<CELL_FLIP(N1,Self)*>();
+        }
+        else if(flip.cell)
+        {
+        auto found = layer.cell_access.find(flip.cell);
+        if(found != layer.cell_access.end())
+        return match(flip, found->second);
+        return std::set<CELL_FLIP(N1,Self)*>();
+        }
+        else if(flip.face1)
+        {
+        auto found = layer.face_access.find(flip.face1);
+        if(found != layer.face_access.end())
+        return match(flip, found->second);
+        return std::set<CELL_FLIP(N1,Self)*>();
+        }
+        else if(flip.face2)
+        {
+        auto found = layer.face_access.find(flip.face2);
+        if(found != layer.face_access.end())
+        return found->second;
+        return std::set<CELL_FLIP(N1,Self)*>();
+        }
+        return std::set<CELL_FLIP(N1,Self)*>();
+      */
+    }
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+    template <int N1>
+    const std::set<CELL_FLIP(N1,Self)*>&
+    match(const CELL_TYPE(N1,Self)& c,
+          const QueryType&, const QueryType&, const QueryType) const
+    {
+      return flipsFromCell(c);
+    }
+
+    template <int N1>
+    const std::set<CELL_FLIP(N1+1,Self)*>&
+    match(const QueryType&,
+          const CELL_TYPE(N1,Self)& c,
+          const QueryType&, const QueryType&) const
+    {
+      return flipsFromFace(c);
+    }
+
+    template <int N1>
+    const std::set<CELL_FLIP(N1+1,Self)*>&
+    match(const QueryType&, const QueryType&,
+          const CELL_TYPE(N1,Self)& c,
+          const QueryType&) const
+    {
+      return flipsFromFace(c);
+    }
+
+    template <int N1>
+    const std::set<CELL_FLIP(N1+2,Self)*>&
+    match(const QueryType&, const QueryType&, const QueryType,
+          const CELL_TYPE(N1,Self)& c ) const
+    {
+      return flipsFromJoint(c);
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_TYPE(N1,Self)& c,
+          const CELL_TYPE(N1-1,Self)& f1, const QueryType&, const QueryType&) const
+    {
+      if(c.isNull())
+        return match(Q,f1,Q,Q);
+      else if(f1.isNull())
+        return match(c,Q,Q,Q);
+      std::set<CELL_FLIP(N1,Self)*> result = flipsFromFace(f1);
+      for(auto it = result.begin() ; it != result.end() ; )
+        {
+          if((*it)->cell == c)
+            ++it;
+          else
+            it = result.erase(it);
+        }
+      return result;
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_TYPE(N1,Self)& c, const QueryType&,
+          const CELL_TYPE(N1-1,Self)& f1, const QueryType&) const
+    {
+      return match(c, f1, Q, Q);
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_TYPE(N1,Self)& c,
+          const CELL_TYPE(N1-1,Self)& f1, const CELL_TYPE(N1-1,Self)& f2, const QueryType&) const
+    {
+      if(c.isNull())
+        return match(Q,f1,f2,Q);
+      else if(f1.isNull())
+        return match(c,f2,Q,Q);
+      else if(f2.isNull())
+        return match(c,f1,Q,Q);
+      std::set<CELL_FLIP(N1,Self)*> result = flipsFromFace(f1);
+      for(auto it = result.begin() ; it != result.end() ; )
+        {
+          if((*it)->cell == c and ((*it)->face1 == f2 or (*it)->face2 == f2))
+            ++it;
+          else
+            it = result.erase(it);
+        }
+      return result;
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_TYPE(N1,Self)& c, const QueryType&, const QueryType&,
+          const CELL_TYPE(N1-2,Self)& j) const
+    {
+      if(c.isNull())
+        return match(Q,Q,Q,j);
+      else if(j.isNull())
+        return match(c,Q,Q,Q);
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      l_cell_flip_t *res = get_layer<N1>(*this).flip(c, j);
+      std::set<l_cell_flip_t*> result;
+      if(res)
+        result.insert(res);
+      return result;
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_TYPE(N1,Self)& cell, const CELL_TYPE(N1-1,Self)& face, const QueryType&,
+          const CELL_TYPE(N1-2,Self)& joint) const
+    {
+      if(cell.isNull())
+        return match(Q,face,Q,joint);
+      else if(face.isNull())
+        return match(cell,Q,Q,joint);
+      else if(joint.isNull())
+        return match(cell,face,Q,Q);
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      l_cell_flip_t *res = get_layer<N1>(*this).flip(cell, face, joint);
+      std::set<l_cell_flip_t*> result;
+      if(res)
+        result.insert(res);
+      return result;
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_TYPE(N1,Self)& c, const QueryType&, const CELL_TYPE(N1-1,Self)& face,
+          const CELL_TYPE(N1-2,Self)& j) const
+    {
+      return match(c, face, Q, j);
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1+1,Self)*>
+    match(const QueryType&, const CELL_TYPE(N1,Self)& f1, const CELL_TYPE(N1,Self)& f2, const QueryType& ) const
+    {
+      if(f1.isNull())
+        return match(Q, f2, Q, Q);
+      else if(f2.isNull())
+        return match(Q, f1, Q, Q);
+      else if(f1 == f2)
+        return std::set<CELL_FLIP(N1+1,Self)*>();
+
+      std::set<CELL_FLIP(N1+1,Self)*> result = flipsFromFace(f1);
+      for(auto it = result.begin() ; it != result.end() ; )
+        {
+          if((*it)->face1 == f2 or (*it)->face2 == f2)
+            ++it;
+          else
+            it = result.erase(it);
+        }
+      return result;
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1+1,Self)*>
+    match(const QueryType&, const CELL_TYPE(N1,Self)& f1, const CELL_TYPE(N1,Self)& f2, const CELL_TYPE(N1-1,Self)& j) const
+    {
+      if(f1.isNull())
+        return match(Q, f2, Q, j);
+      else if(f2.isNull())
+        return match(Q, f1, Q, j);
+      else if(j.isNull())
+        return match(Q, f1, f2, Q);
+      else if(f1 == f2)
+        return std::set<CELL_FLIP(N1+1,Self)*>();
+
+      std::set<CELL_FLIP(N1+1,Self)*> result = flipsFromFace(f1);
+      for(auto it = result.begin() ; it != result.end() ; )
+        {
+          if((*it)->joint == j and ((*it)->face1 == f2 or (*it)->face2 == f2))
+            ++it;
+          else
+            it = result.erase(it);
+        }
+      return result;
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1+1,Self)*>
+    match(const QueryType&, const CELL_TYPE(N1,Self)& f1, const QueryType&, const CELL_TYPE(N1-1,Self)& j) const
+    {
+      if(f1.isNull())
+        return match(Q, Q, Q, j);
+      else if(j.isNull())
+        return match(Q, f1, Q, Q);
+
+      std::set<CELL_FLIP(N1+1,Self)*> result = flipsFromFace(f1);
+      for(auto it = result.begin() ; it != result.end() ; )
+        {
+          if((*it)->joint == j)
+            ++it;
+          else
+            it = result.erase(it);
+        }
+      return result;
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1+1,Self)*>
+    match(const QueryType&, const QueryType&, const CELL_TYPE(N1,Self)& f1, const CELL_TYPE(N1-1,Self)& j) const
+    {
+      return match(Q, f1, Q, j);
+    }
+
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_TYPE(N1,Self)& cell, const CELL_TYPE(N1-1,Self)& face1, const CELL_TYPE(N1-1,Self)& face2, const CELL_TYPE(N1-2,Self)& joint) const
+    {
+      if(cell.isNull())
+        return match(Q, face1, face2, joint);
+      else if(face1.isNull())
+        return match(cell, face2, Q, joint);
+      else if(face2.isNull())
+        return match(cell, face1, Q, joint);
+      else if(joint.isNull())
+        return match(cell, face1, face2, Q);
+
+      const std::set<CELL_FLIP(N1,Self)*>& flips = flipsFromCell(cell);
+      std::set<CELL_FLIP(N1,Self)*> result;
+      typename ncell_t<N1>::cell_flip_t flip(cell, face1, face2, joint);
+      for(auto it = flips.begin() ; it != flips.end() ; ++it)
+        {
+          if(flip.equiv(**it))
+            {
+              result.insert(*it);
+              return result;
+            }
+        }
+      return result;
+      //return match(cellFlip(cell, face1, face2, joint));
+    }
+
+#else // DOXYGEN_SHOULD_SKIP_THIS
+    /**
+     * Find the set of flips matching the results.
+     *
+     * Each argument, but not all at once, can be replaced by a QueryType variable, which is equivalent to put a null cell.
+     * Note that the methods with a QueryType are implemented separately to optimise access to the tuples.
+     *
+     * Also, all the methods having only one non-query variable return constant reference to the actual data structure, which avoid copying it.
+     */
+    template <int N1>
+    std::set<CELL_FLIP(N1,Self)*>
+    match(const CELL_TYPE(N1,Self)& cell, const CELL_TYPE(N1-1,Self)& face1, const CELL_TYPE(N1-1,Self)& face2, const CELL_TYPE(N1-2,Self)& joint)
+    {
+      // Implementation depends on the actual type of the cells
+      return std::set<CELL_FLIP(N1,Self)*>();
+    }
+#endif // DOXYGEN_SHOULD_SKIP_THIS
+
+    //@}
+    ///\name Neighborhood relationship
+    //@{
+
+    /**
+     * Get the neighbors of the cell \c c
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1>::cell_t>
+    neighbors(const CELL_TYPE(N1,Self)& c) const
+    {
+      STATIC_ASSERT(N1 >= 0 and N1 <= N, "neighbors can only be called for cells of dimension from 0 to N.");
+      CellSet<typename ncell_t<N1>::cell_t> result = cobounds(bounds(c));
+      result.erase(c);
+      return result;
+    }
+
+    /**
+     * As a special case, the neighbors of a vertex are actually the adjacent cells of the vertex
+     */
+    CellSet<vertex_t> neighbors(const vertex_t& v) const
+    {
+      return adjacentCells(v);
+    }
+
+    /**
+     * As an optimization, the neighbors of a \f$N\f$-cell are the adjacent cells
+     */
+    CellSet<cell_t> neighbors(const cell_t& c) const
+    {
+      return adjacentCells(c);
+    }
+
+    /**
+     * Number of neighbors for the cell \c c
+     */
+    template <int N1>
+    size_type nbNeighbors(const CELL_TYPE(N1,Self)& c) const
+    {
+      return neighbors(c).size();
+    }
+
+    /**
+     * Check if \c c1 and \c c2 are neighbors
+     */
+    template <int N1>
+    bool areNeighbors(const CELL_TYPE(N1,Self)& c1,
+                      const CELL_TYPE(N1,Self)& c2) const
+    {
+      STATIC_ASSERT(N1 >= 0 and N1 <= N, "areNeighbors can only be called for cells of dimension from 0 to N.");
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      forall l_cell_flip_t* pf in match(c1, Q, Q, Q):
+        {
+          if(!match(c2, pf->face1, Q, Q).empty()) return true;
+          if(!match(c2, pf->face2, Q, Q).empty()) return true;
+        }
+      return false;
+    }
+
+    /**
+     * As a special case, two vertices are neighbors if they are adjacent
+     */
+    bool areNeighbors(const vertex_t& v1, const vertex_t& v2) const
+    {
+      return areAdjacent(v1, v2);
+    }
+
+    /**
+     * As an optimization, two \f$N\f$-cells are neighbors if they are adjacent
+     */
+    bool areNeighbors(const cell_t& c1, const cell_t& c2) const
+    {
+      return areAdjacent(c1, c2);
+    }
+
+    /**
+     * Return a neighbor of the cell
+     */
+    template <int N1>
+    const typename ncell_t<N1>::cell_t&
+    anyNeighbor(const CELL_TYPE(N1,Self)& c)
+    {
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      forall l_cell_flip_t* pf1 in match(c,Q,Q,Q):
+        {
+          forall l_cell_flip_t* pf2 in match(Q,pf1->face1,Q,Q): if(pf2->cell != c)
+            return pf2->cell;
+          forall l_cell_flip_t* pf2 in match(Q,pf1->face2,Q,Q): if(pf2->cell != c)
+            return pf2->cell;
+        }
+      return l_cell_t::null;
+    }
+
+    /**
+     * As a special case, a neighbor of a vertex is an adjacent cell of the vertex
+     */
+    const vertex_t& anyNeighbor(const vertex_t& v) const
+    {
+      return anyAdjacent(v);
+    }
+
+    /**
+     * As an optimization, a neighbor of a \f$N\f$-cell is an adjacent cell
+     */
+    const cell_t& anyNeighbor(const cell_t& c) const
+    {
+      return anyAdjacent(c);
+    }
+
+    /**
+     * Get the co-neighbors of the cell \c c
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1>::cell_t>
+    coneighbors(const CELL_TYPE(N1,Self)& c) const
+    {
+      STATIC_ASSERT(N1 >= 0 and N1 <= N, "coneighbors can only be called for cells of dimension from 0 to N.");
+      CellSet<typename ncell_t<N1>::cell_t> result = bounds(cobounds(c));
+      result.erase(c);
+      return result;
+    }
+
+    /**
+     * Number of co-neighbors of a cell
+     */
+    template <int N1>
+    size_type nbConeighbors(const CELL_TYPE(N1,Self)& c) const
+    {
+      return coneighbors(c).size();
+    }
+
+    /**
+     * Check if \c c1 and \c c2 are co-neighbors
+     */
+    template <int N1>
+    bool areConeighbors(const CELL_TYPE(N1,Self)& c1,
+                        const CELL_TYPE(N1,Self)& c2)
+    {
+      STATIC_ASSERT(N1 >= 0 and N1 <= N, "areNeighbors can only be called for cells of dimension from 0 to N.");
+      typedef typename ncell_t<N1+1>::cell_flip_t l_cell_flip_t;
+      forall l_cell_flip_t* pf in match(Q, c1, Q, Q):
+        if(!match(pf->cell, c2, Q, Q).empty()) return true;
+      return false;
+    }
+
+    /**
+     * Return a co-neighbor of the cell \c c
+     */
+    template <int N1>
+    typename ncell_t<N1>::cell_t&
+    anyConeighbor(const CELL_TYPE(N1,Self)& c)
+    {
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_cell_flip_t;
+      forall l_cell_flip_t* pf1 in match(Q,c,Q,Q):
+        return pf1->otherFace(c);
+      return l_cell_t::null;
+    }
+
+    /**
+     * Get the adjacent cells of the cell \c c
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1>::cell_t>
+    adjacentCells(const CELL_TYPE(N1,Self)& c) const
+    {
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_coface_flip_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+
+      CellSet<l_cell_t> result;
+
+      const std::set<l_coface_flip_t*>& matches = match(Q,c,Q,Q);
+      forall l_coface_flip_t* pf in matches:
+      result.insert(pf->otherFace(c));
+
+      return result;
+    }
+
+    /**
+     * Number of cells adjacent to \c c
+     */
+    template <int N1>
+    size_type nbAdjacentCells(const CELL_TYPE(N1,Self)& c) const
+    {
+      return adjacentCells(c).size();
+    }
+
+    /**
+     * Check if \c c1 and \c c2 are adjacent
+     */
+    template <int N1>
+    bool areAdjacent(const CELL_TYPE(N1,Self)& c1,
+                     const CELL_TYPE(N1,Self)& c2) const
+    {
+      STATIC_ASSERT(N1 >= 0 and N1 <= N, "areAdjacent can only be called for cells of dimension from 0 to N.");
+      return not match(Q, c1, c2, Q).empty();
+    }
+
+    /**
+     * Return an adjacent cell of \c c
+     */
+    template <int N1>
+    const typename ncell_t<N1>::cell_t&
+    anyAdjacentCell(const CELL_TYPE(N1,Self)& c) const
+    {
+      STATIC_ASSERT(N1 >= 0 and N1 <= N, "areNeighbors can only be called for cells of dimension from 0 to N.");
+      typedef typename ncell_t<N1+1>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1>::cell_t l_face_t;
+
+      forall l_cell_flip_t* pf in match(Q, c, Q, Q):
+        return pf->otherFace(c);
+
+      return l_face_t::null;
+    }
+    //@}
+    ///\name Bounds - Descending topological relationship
+    //@{
+
+    /**
+     * Returns the bounds (i.e. faces) of a vertex.
+     *
+     * \note If the vertex is in the complex, this is the bottom cell.
+     */
+    CellSet<bottom_t> bounds(const vertex_t& v) const
+    {
+      CellSet<bottom_t> result;
+      if(hasCell(v))
+        result.insert(_);
+      return result;
+    }
+
+    /**
+     * Returns the union of the bounds of a set of cells
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1-1>::cell_t>
+    bounds(const CellSet<CELL_TYPE(N1,Self)>& cset) const
+    {
+      return bounds<N1-1>(cset);
+    }
+
+    /**
+     * Returns the union of the N1-bounds of a set of cells
+     */
+    template <int N1, int N2>
+    CellSet<typename ncell_t<N1>::cell_t>
+    bounds(const CellSet<CELL_TYPE(N2,Self)>& cset) const
+    {
+      typedef typename ncell_t<N2>::cell_t l_cell_t;
+      typedef typename ncell_t<N1>::cell_t l_bound_t;
+      CellSet<l_bound_t> result;
+      forall const l_cell_t& c in cset:
+        result |= bounds<N1>(c);
+      return result;
+    }
+
+    /**
+     * Returns the set of bounds of a cell
+     */
+    template <int N1>
+    CellSet<CELL_TYPE(N1-1,Self) >
+    bounds(const CELL_TYPE(N1,Self)& c) const
+    {
+      STATIC_ASSERT(N1 > 0 and N1 <= N+1, "You cannot only ask for the bounds of a cell of dimension between 0 and N+1.");
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      CellSet<l_face_t> result;
+      const std::set<l_cell_flip_t*>& matches = match(c,Q,Q,Q);
+      forall l_cell_flip_t* pct in matches:
+      {
+        result.insert(pct->face1);
+        result.insert(pct->face2);
+      }
+      return result;
+    }
+
+    /**
+     * Get the set of N1-cells that are in the boundary of \c c
+     */
+    template <int N1, int N2>
+    CellSet<typename ncell_t<N1>::cell_t>
+    bounds(const CELL_TYPE(N2, Self)& c) const
+    {
+      STATIC_ASSERT(N2 > N1, "The dimension of the n-bounds must be stricly smaller than the dimension of the cell.");
+      STATIC_ASSERT(N2 > N1 and N2 <= N+1, "The cell must be of dimension from N2+1 to N+1.");
+      return _bounds<N1>(c, typename one_two_many<N2-N1>::type());
+    }
+
+    /**
+     * Number of bounds of the cell \c c
+     */
+    template <int N1>
+    size_type nbBounds(const CELL_TYPE(N1,Self)& c) const
+    {
+      return bounds(c).size();
+    }
+
+    /**
+     * Number of N1-bounds of the cell \c c
+     */
+    template <int N1, int N2>
+    size_type nbBounds(const CELL_TYPE(N2,Self)& c) const
+    {
+      return bounds<N1>(c).size();
+    }
+
+    /**
+     * Number of bounds of a set of cells
+     */
+    template <int N1>
+    size_type nbBounds(const CellSet<CELL_TYPE(N1,Self)>& c) const
+    {
+      return bounds(c).size();
+    }
+
+    /**
+     * Number of N1-bounds of a set of cells
+     */
+    template <int N1, int N2>
+    size_type nbBounds(const CellSet<CELL_TYPE(N2,Self)>& c) const
+    {
+      return bounds<N1>(c).size();
+    }
+
+    /// Check if \c c2 is in the boundary of \c c1
+    template <int N1, int N2>
+    bool isBound(const CELL_TYPE(N1,Self)& c1,
+                 const CELL_TYPE(N2,Self)& c2) const
+    {
+      STATIC_ASSERT(N1 > N2, "The second cell has to be of dimension strictly smaller than the first cell.");
+      return _isBound(c1, c2, typename one_two_many<N1-N2>::type());
+    }
+
+    /**
+     * Returns a N1-bound of the cell \c c
+     */
+    template <int N1, int N2>
+    const typename ncell_t<N1>::cell_t& anyBound(const CELL_TYPE(N2,Self)& c) const
+    {
+      STATIC_ASSERT(N1 >= -1 and N1<N2, "The dimension of a n-bound must be stricly smaller than the dimension of the cell.");
+      return _anybounds<N1>(c, typename one_two_many<N2-N1>::type());
+    }
+
+    /**
+     * Returns a N1-bound of the vertex \c v
+     *
+     * \note N1 MUST be -1
+     */
+    template <int N1>
+    const typename ncell_t<N1>::cell_t& anyBound(const vertex_t& v) const
+    {
+      STATIC_ASSERT(N1 == -1, "You can only ask for the -1-bounds of a vertex.");
+      return anyBound(v);
+    }
+
+
+    /**
+     * Return a bound of the cell \c c
+     */
+    template <int N1>
+    const typename ncell_t<N1-1>::cell_t& anyBound(const CELL_TYPE(N1,Self)& c) const
+    {
+      STATIC_ASSERT(N1 > 0 and N1 <= N+1, "You cannot only ask for the bounds of a cell of dimension between 0 and N+1.");
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      const std::set<l_cell_flip_t*>& matches = match(c, Q, Q, Q);
+      if(not matches.empty())
+        return (*matches.begin())->face1;
+      return l_face_t::null;
+    }
+
+    /**
+     * Return the bottom cell if the vertex exist, as the bottom cell is always a face of a vertex
+     */
+    const bottom_t& anyBound(const vertex_t& v) const
+    {
+      if(hasCell(v)) return _;
+      return bottom_t::null;
+    }
+
+    /**
+     * Return the faces of the cell \c c, i.e. the N1-1-bounds
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1-1>::cell_t> faces(const CELL_TYPE(N1,Self)& c) const
+    {
+      return bounds(c);
+    }
+
+    /**
+     * Return the faces of a set of cells, i.e. the N1-1-bounds
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1-1>::cell_t> faces(const CellSet<CELL_TYPE(N1,Self)>& c) const
+    {
+      return bounds(c);
+    }
+
+    /**
+     * Number of faces of the cell \c c
+     */
+    template <int N1>
+    size_type nbFaces(const CELL_TYPE(N1,Self)& c) const
+    {
+      return nbBounds(c);
+    }
+
+    /**
+     * Number of faces of a set of cells
+     */
+    template <int N1>
+    size_type nbFaces(const CellSet<CELL_TYPE(N1,Self)>& c) const
+    {
+      return nbBounds(c);
+    }
+
+    /**
+     * Return true if \c f is a face of \c c.
+     */
+    template <int N1>
+    bool isFace(const CELL_TYPE(N1,Self)& c, const CELL_TYPE(N1-1,Self)& f) const
+    {
+      return isBound(c,f);
+    }
+
+    /**
+     * Return a bound of the cell \c c, i.e. a N1-1-bound
+     */
+    template <int N1>
+    const typename ncell_t<N1-1>::cell_t& anyFace(const CELL_TYPE(N1,Self)& c) const
+    {
+      return anyBound(c);
+    }
+
+    /**
+     * Return the joints of a cell
+     */
+    CellSet<bottom_t> joints(edge_t& e) const
+    {
+      CellSet<bottom_t> result;
+      if(hasCell(e)) result.insert(_);
+      return result;
+    }
+
+    /**
+     * Return the joints of a cell
+     */
+    template <int N1>
+    CellSet<CELL_TYPE(N1-2,Self)>
+    joints(const CELL_TYPE(N1,Self)& c) const
+    {
+      STATIC_ASSERT(N1 > 1 and N1 < N+1, "You can only ask joints of a cell of dimension between 1 and N+1.");
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1-2>::cell_t l_joint_t;
+      CellSet<l_joint_t> result;
+      const std::set<l_cell_flip_t*>& matches = match(c,Q,Q,Q);
+      forall l_cell_flip_t* pf in matches:
+      result.insert(pf->joint);
+      return result;
+    }
+
+    /**
+     * Joints of a set of cells
+     */
+    template <int N1>
+    CellSet<CELL_TYPE(N1-2,Self)>
+    joints(const CellSet<CELL_TYPE(N1,Self)>& C) const
+    {
+      return bounds<N1-2>(C);
+    }
+
+    /**
+     * Number of joints of the cell \c c
+     */
+    template <int N1>
+    size_type nbJoints(const CELL_TYPE(N1,Self)& c) const
+    {
+      return joints(c).size();
+    }
+
+    /**
+     * Number of joints of a set of cells
+     */
+    template <int N1>
+    size_type nbJoints(const CellSet<CELL_TYPE(N1,Self)>& c) const
+    {
+      return joints(c).size();
+    }
+
+    /**
+     * Return true if \c j is a joint of the cell \c c
+     */
+    template <int N1>
+    bool isJoint(const CELL_TYPE(N1,Self)& c, const CELL_TYPE(N1-2,Self)& j) const
+    {
+      return isBound(c,j);
+    }
+
+    /**
+     * Return a joint of the cell \c c, i.e. a N1-2-bound
+     */
+    template <int N1>
+    const typename ncell_t<N1-2>::cell_t& anyJoint(const CELL_TYPE(N1,Self)& c) const
+    {
+      STATIC_ASSERT(N1 > 1 and N1 <= N+1, "You cannot only ask for the joints of a cell of dimension between 1 and N+1.");
+      typedef typename ncell_t<N1-2>::cell_t l_joint_t;
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      const std::set<l_cell_flip_t*>& matches = match(c,Q,Q,Q);
+      if(not matches.empty())
+        return (*matches.begin())->joint;
+      return l_joint_t::null;
+    }
+
+    /**
+     * Return the bottom cell if the edge exist, as the bottom cell is the joint of all edge.
+     */
+    const bottom_t& anyJoint(const edge_t& e) const
+    {
+      if(hasCell(e)) return _;
+      return bottom_t::null;
+    }
+
+    /**
+     * Return the list of edges of the cell
+     */
+    template <int N1>
+    CellSet<edge_t> edges(const CELL_TYPE(N1,Self)& c) const
+    {
+      return bounds<1>(c);
+    }
+
+    /**
+     * Return the list of edges in a set of cells
+     */
+    template <int N1>
+    CellSet<edge_t> edges(const CellSet<CELL_TYPE(N1,Self)>& c) const
+    {
+      return bounds<1>(c);
+    }
+
+    /**
+     * Return the number of edges of the cell
+     */
+    template <int N1>
+    size_type nbEdges(const CELL_TYPE(N1,Self)& c) const
+    {
+      return edges(c).size();
+    }
+
+    /**
+     * Return the number of edges in a set of cells
+     */
+    template <int N1>
+    size_type nbEdges(const CellSet<CELL_TYPE(N1,Self)>& c) const
+    {
+      return edges(c).size();
+    }
+
+    /**
+     * Return true if \c e is an edge of \c c
+     */
+    template <int N1>
+    bool isEdge(const CELL_TYPE(N1,Self)& c, const edge_t& e) const
+    {
+      return isBound(c,e);
+    }
+
+    /**
+     * Return an edge of the cell
+     */
+    template <int N1>
+    const edge_t& anyEdge(const CELL_TYPE(N1, Self)& c) const
+    {
+      return anyBound<1>(c);
+    }
+
+    /**
+     * Return the list of edges of the cell
+     */
+    template <int N1>
+    CellSet<vertex_t> vertices(const CELL_TYPE(N1,Self)& c) const
+    {
+      return bounds<0>(c);
+    }
+
+    /**
+     * Return the list of edges in a set of cells
+     */
+    template <int N1>
+    CellSet<vertex_t> vertices(const CellSet<CELL_TYPE(N1,Self)>& c) const
+    {
+      return bounds<0>(c);
+    }
+
+    /**
+     * Return the number of vertices in a cell
+     */
+    template <int N1>
+    size_type nbVertices(const CELL_TYPE(N1,Self)& c) const
+    {
+      return vertices(c).size();
+    }
+
+    /**
+     * Return the number of vertices in a set of cells
+     */
+    template <int N1>
+    size_type nbVertices(const CellSet<CELL_TYPE(N1,Self)>& c) const
+    {
+      return vertices(c).size();
+    }
+
+    /**
+     * Return true if \c v is a vertex of \c c
+     */
+    template <int N1>
+    bool isVertex(const CELL_TYPE(N1,Self)& c, const vertex_t& v) const
+    {
+      return isBound(c,v);
+    }
+
+    /**
+     * Retyrb a vertex of the cell
+     */
+    template <int N1>
+    const vertex_t& anyVertex(const CELL_TYPE(N1,Self)& c) const
+    {
+      return anyBound<0>(c);
+    }
+
+    //@}
+
+    ///\name Cobounds - Ascending topological relationship
+    //@{
+    /**
+     * Return the set of cobounds of a cell
+     *
+     * The co-bounds are the cells that have \c c as a face
+     */
+    CellSet<typename ncell_t<N+1>::cell_t>
+    cobounds(const cell_t& c) const
+    {
+      CellSet<typename ncell_t<N+1>::cell_t> result;
+      if(hasCell(c))
+        result.insert(T);
+      return result;
+    }
+
+    /**
+     * Return the set of cobounds of a cell
+     *
+     * The co-bounds are the cells that have \c c as a face
+     */
+    template <int N1>
+    CellSet<CELL_TYPE(N1+1,Self) >
+    cobounds(const CELL_TYPE(N1,Self)& f) const
+    {
+      STATIC_ASSERT(N1 >= -1 and N1 < N, "You can only ask for the cobounds of a cell of dimension between -1 and N.");
+      typedef typename ncell_t<N1+1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_cell_flip_t;
+      CellSet<l_cell_t> result;
+      const std::set<l_cell_flip_t*>& matches = match(Q,f,Q,Q);
+      forall l_cell_flip_t* pct in matches:
+      {
+        result.insert(pct->cell);
+      }
+      return result;
+    }
+
+    /**
+     * Return the set of N1-cobounds of a cell
+     *
+     * The co-bounds are the cells that have \c c as a bound
+     */
+    template <int N1, int N2>
+    CellSet<CELL_TYPE(N1,Self) >
+    cobounds(const CELL_TYPE(N2,Self)& c) const
+    {
+      STATIC_ASSERT(N1>N2, "The return-dimension must be greater than the dimension of the cell.");
+      STATIC_ASSERT(N2 >= -1 and N2 < N1, "The dimension of the cell must be between -1 and N1-1.");
+      return _cobounds<N1>(c, typename one_two_many<N1-N2>::type());
+    }
+
+    /**
+     * Return the N1-cobounds of a set of cells
+     */
+    template <int N1, int N2>
+    CellSet<CELL_TYPE(N1,Self)>
+    cobounds(const CellSet<CELL_TYPE(N2,Self)>& C) const
+    {
+      typedef typename ncell_t<N2>::cell_t l_cell_t;
+      CellSet<CELL_TYPE(N1,Self)> result;
+      forall const l_cell_t& c in C:
+        result |= cobounds<N1>(c);
+      return result;
+    }
+
+    /**
+     * Return the cobounds of a set of cells
+     */
+    template <int N1>
+    CellSet<CELL_TYPE(N1+1,Self)>
+    cobounds(const CellSet<CELL_TYPE(N1,Self)>& C) const
+    {
+      return cobounds<N1+1>(C);
+    }
+
+    /**
+     * Return the number of co-bounds of the cell \c c
+     */
+    template <int N1>
+    size_type nbCobounds(const CELL_TYPE(N1,Self)& c) const
+    {
+      return cobounds(c).size();
+    }
+
+    /**
+     * Return the number of N1-co-bounds of the cell \c c
+     */
+    template <int N1, int N2>
+    size_type nbCobounds(const CELL_TYPE(N2,Self)& c) const
+    {
+      return cobounds<N1>(c).size();
+    }
+
+    /**
+     * Return the number of co-bounds of a set of cells
+     */
+    template <int N1>
+    size_type nbCobounds(const CellSet<CELL_TYPE(N1,Self)>& c) const
+    {
+      return cobounds(c).size();
+    }
+
+    /**
+     * Return the number of N1-co-bounds of a set of cells
+     */
+    template <int N1, int N2>
+    size_type nbCobounds(const CellSet<CELL_TYPE(N2,Self)>& c) const
+    {
+      return cobounds<N1>(c).size();
+    }
+
+    /**
+     * Return true if \c c2 is a cobounds of \c c1
+     */
+    template <int N1, int N2>
+    bool isCobound(const CELL_TYPE(N1,Self)& c1, const CELL_TYPE(N2,Self)& c2)
+    {
+      STATIC_ASSERT(N2 > N1, "The dimension of the cobound must be higher than the dimension of the reference cell.");
+      return isBound(c2, c1);
+    }
+
+    /**
+     * Return a cell for which \c c is a bound
+     */
+    template <int N1>
+    const typename ncell_t<N1+1>::cell_t& anyCobound(const CELL_TYPE(N1,Self)& c) const
+    {
+      STATIC_ASSERT(N1 >= -1 and N1 < N, "anyCobound requires a cell of dimension between -1 and N.");
+      typedef typename ncell_t<N1+1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_cell_flip_t;
+      const std::set<l_cell_flip_t*>& matches = match(Q,c,Q,Q);
+      if(not matches.empty())
+        return (*matches.begin())->cell;
+      return l_cell_t::null;
+    }
+
+    /**
+     * If the cell exist, return the top cell, as all cells are faces of the top cell.
+     */
+    const top_t& anyCobound(const cell_t& c) const
+    {
+      if(hasCell(c)) return T;
+      return top_t::null;
+    }
+
+    /**
+     * Return a N1-cell for which \c c is a bound
+     */
+    template <int N1, int N2>
+    const typename ncell_t<N1>::cell_t& anyCobound(const CELL_TYPE(N2,Self)& c) const
+    {
+      STATIC_ASSERT(N1 > N2, "The dimension of the cobound must be higher than the dimension of the reference cell.");
+      STATIC_ASSERT(N2 >= -1, "The dimension of the cell must be at least -1.");
+      return _anycobound<N1>(c, typename one_two_many<(N1-N2)>::type());
+    }
+
+    /**
+     * Return the cofaces of a cell
+     */
+    template <int N1>
+    CellSet<CELL_TYPE(N1+1,Self) >
+    cofaces(const CELL_TYPE(N1,Self)& f) const
+    {
+      return cobounds(f);
+    }
+
+    /**
+     * Return the cofaces of a set of cells
+     */
+    template <int N1>
+    CellSet<CELL_TYPE(N1+1,Self) >
+    cofaces(const CellSet<CELL_TYPE(N1,Self)>& F) const
+    {
+      return cobounds(F);
+    }
+
+    /**
+     * Return the number of cofaces of a cell
+     */
+    template <int N1>
+    size_type nbCofaces(const CELL_TYPE(N1,Self)& f) const
+    {
+      return cofaces(f).size();
+    }
+
+    /**
+     * Return the number of cofaces of a set of cells
+     */
+    template <int N1>
+    size_type nbCofaces(const CellSet<CELL_TYPE(N1,Self)>& f) const
+    {
+      return cofaces(f).size();
+    }
+
+    /**
+     * Return true is \c c is a coface of \c f
+     */
+    template <int N1>
+    bool isCoface(const CELL_TYPE(N1, Self)& f, const CELL_TYPE(N1+1, Self)& c)
+    {
+      return isCobound(f,c);
+    }
+
+    /**
+     * Return the cofaces of a cell
+     */
+    template <int N1>
+    CELL_TYPE(N1+1,Self)
+    anyCoface(const CELL_TYPE(N1,Self)& f) const
+    {
+      return anyCobound(f);
+    }
+
+    /**
+     * Return the co-joints of a cell
+     *
+     * Co-joints are cells having \c e as joint
+     */
+    CellSet<top_t> cojoints(const face_t& e) const
+    {
+      CellSet<top_t> result;
+      if(hasCell(e)) result.insert(T);
+      return result;
+    }
+
+    /**
+     * Return the co-joints of a cell
+     *
+     * Co-joints are cells having \c c as joint
+     */
+    template <int N1>
+    CellSet<CELL_TYPE(N1+2,Self)>
+    cojoints(const CELL_TYPE(N1,Self)& c) const
+    {
+      typedef typename ncell_t<N1>::cell_t l_joint_t;
+      typedef typename ncell_t<N1+2>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1+2>::cell_t l_cell_t;
+      CellSet<l_cell_t> result;
+      const std::set<l_cell_flip_t*>& matches = match(Q,Q,Q,c);
+      forall l_cell_flip_t* pf in matches:
+      result.insert(pf->cell);
+      return result;
+    }
+
+    /**
+     * Return the cojoints of a set of cells
+     */
+    template <int N1>
+    CellSet<CELL_TYPE(N1+2,Self) >
+    cojoints(const CellSet<CELL_TYPE(N1,Self)>& J) const
+    {
+      return cobounds<N1+2>(J);
+    }
+
+    /**
+     * Return the number of cojoints of a cell
+     */
+    template <int N1>
+    size_type nbCojoints(const CELL_TYPE(N1,Self)& j) const
+    {
+      return cojoints(j).size();
+    }
+
+    /**
+     * Return the number of cojoints of a set of cells
+     */
+    template <int N1>
+    size_type nbCojoints(const CellSet<CELL_TYPE(N1,Self)>& j) const
+    {
+      return cojoints(j).size();
+    }
+
+    /**
+     * Return true if \c j is a joint of \c c
+     */
+    template <int N1>
+    bool isCojoint(const CELL_TYPE(N1, Self)& j, const CELL_TYPE(N1+2,Self)& c)
+    {
+      return isBound(c,j);
+    }
+
+    /**
+     * Return the top-cell if the face exist, as a face is always the joint of the top cell
+     */
+    const top_t& anyCojoint(const face_t& f) const
+    {
+      if(hasCell(f)) return T;
+      return top_t::null;
+    }
+
+    /**
+     * Return a cell for which \c c is a joint
+     */
+    template <int N1>
+    const typename ncell_t<N1+2>::cell_t& anyCojoint(const CELL_TYPE(N1,Self)& c) const
+    {
+      typedef typename ncell_t<N1+2>::cell_t l_cell_t;
+      typedef typename ncell_t<N1+2>::cell_flip_t l_cell_flip_t;
+      const std::set<l_cell_flip_t*>& matches = match(Q,Q,Q,c);
+      if(not matches.empty())
+        return (*matches.begin())->cell;
+      return l_cell_t::null;
+    }
+
+    //@}
+
+    ///\name Global topological queries
+    //@{
+
+    /**
+     * True if the N-cell \c c is on the exterior of the cell complex
+     */
+    bool border(const cell_t& c) const
+    {
+      forall const face_t& f in bounds(c):
+        if(border(f)) return true;
+      return false;
+    }
+
+    /**
+     * True if the face \c f is on the exterior of the cell complex
+     */
+    bool border(const face_t& f) const
+    {
+      return hasCell(f) and match(Q,Q,Q,f).empty();
+    }
+
+    /**
+     * True if the N1-cell \c c is in the boundary of a border face
+     */
+    template <int N1>
+    bool border(const CELL_TYPE(N1,Self)& c) const
+    {
+      STATIC_ASSERT(N1 < N-1, "Error, border doesn't work with the top cell.");
+      forall const face_t& f in cobounds<N-1>(c): if(border(f))
+        return true;
+      return false;
+    }
+
+    //@}
+
+  protected:
+    ///\name Unordered lookup implementation
+    //@{
+    /**
+     * Returns the bounds of the cell \c c
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1>::cell_t>
+    _bounds(const typename ncell_t<N1+1>::cell_t& c, const one_type&) const
+    {
+      return bounds(c);
+    }
+
+    /**
+     * Returns the joints of the cell \c c
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1>::cell_t>
+    _bounds(const typename ncell_t<N1+2>::cell_t& c, const two_type&) const
+    {
+      return joints(c);
+    }
+
+    /**
+     * Returns the bounds of the cell \c c if there is a difference of more than 2
+     */
+    template <int N1, int N2>
+    CellSet<typename ncell_t<N1>::cell_t>
+    _bounds(const CELL_TYPE(N2, Self)& c, const many_type&) const
+    {
+      typedef typename ncell_t<N2-2>::cell_t l_joint_t;
+      typedef typename ncell_t<N1>::cell_t l_target_t;
+      CellSet<l_target_t> result;
+      forall const l_joint_t& j in joints(c):
+        result |= bounds<N1>(j);
+      return result;
+    }
+
+    /**
+     * Return the co-bounds of the cell \c c
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1>::cell_t>
+    _cobounds(const typename ncell_t<N1-1>::cell_t& c, const one_type&) const
+    {
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      return cobounds(c);
+    }
+
+    /**
+     * Return the co-joints of the cell \c c
+     */
+    template <int N1>
+    CellSet<typename ncell_t<N1>::cell_t>
+    _cobounds(const typename ncell_t<N1-2>::cell_t& c, const two_type&) const
+    {
+      return cojoints(c);
+    }
+
+    /**
+     * Return the N1-cobounds of the cell \c c if the difference is at least 3
+     */
+    template <int N1, int N2>
+    CellSet<typename ncell_t<N1>::cell_t>
+    _cobounds(const CELL_TYPE(N2, Self)& c, const many_type&) const
+    {
+      typedef typename ncell_t<N2+2>::cell_t l_cell_t;
+      typedef typename ncell_t<N1>::cell_t l_target_t;
+      CellSet<l_target_t> result;
+      forall const l_cell_t& v in cojoints(c):
+        result |= cobounds<N1>(v);
+      return result;
+    }
+
+
+    /**
+     * Return the co-bounds of the cell \c c
+     */
+    template <int N1>
+    const typename ncell_t<N1>::cell_t&
+    _anycobound(const typename ncell_t<N1-1>::cell_t& c, const one_type&) const
+    {
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      return anyCobound(c);
+    }
+
+    /**
+     * Return the co-joints of the cell \c c
+     */
+    template <int N1>
+    const typename ncell_t<N1>::cell_t&
+    _anycobound(const typename ncell_t<N1-2>::cell_t& c, const two_type&) const
+    {
+      return anyCojoints(c);
+    }
+
+    /**
+     * Return the N1-cobounds of the cell \c c if the difference is at least 3
+     */
+    template <int N1, int N2>
+    const typename ncell_t<N1>::cell_t&
+    _anycobound(const CELL_TYPE(N2, Self)& c, const many_type&) const
+    {
+      typedef typename ncell_t<N2+2>::cell_t l_cell_t;
+      typedef typename ncell_t<N1>::cell_t l_target_t;
+      return anyCobound<N1>(anyCojoint(c));
+    }
+
+    /**
+     * Check that \c c2 is a bound of \c c1
+     */
+    template <int N1>
+    bool _isBound(const CELL_TYPE(N1,Self)& c1,
+                  const CELL_TYPE(N1-1,Self)& c2,
+                  const one_type& ) const
+    {
+      return not match(c1, c2, Q, Q).empty();
+    }
+
+    /**
+     * Check that \c c2 is a joint of \c c1
+     */
+    template <int N1>
+    bool _isBound(const CELL_TYPE(N1,Self)& c1,
+                  const CELL_TYPE(N1-2,Self)& c2,
+                  const two_type& ) const
+    {
+      return not match(c1, Q, Q, c2).empty();
+    }
+
+    /**
+     * Check that \c c2 is in the boundary of a joint of \c c1
+     */
+    template <int N1, int N2>
+    bool _isBound(const CELL_TYPE(N1,Self)& c1,
+                  const CELL_TYPE(N2,Self)& c2,
+                  const many_type& ) const
+    {
+      typedef typename ncell_t<N1-2>::cell_t l_joint_t;
+      CellSet<l_joint_t> js = joints(c1);
+      forall const l_joint_t& j in js:
+        if(isBound(j, c2)) return true;
+      return false;
+    }
+
+    /**
+     * Returns a bound of \c c
+     */
+    template <int N1>
+    const typename ncell_t<N1>::cell_t&
+    _anybounds(const typename ncell_t<N1+1>::cell_t& c, const one_type&) const
+    {
+      return anyBound(c);
+    }
+
+    /**
+     * Returns a joint of \c c
+     */
+    template <int N1>
+    const typename ncell_t<N1>::cell_t&
+    _anybounds(const typename ncell_t<N1+2>::cell_t& c, const two_type&) const
+    {
+      return anyJoint(c);
+    }
+
+    /**
+     * Returns a bounds of a joint of \c c
+     */
+    template <int N1, int N2>
+    const typename ncell_t<N1>::cell_t&
+    _anybounds(const CELL_TYPE(N2, Self)& c, const many_type&) const
+    {
+      return anyBound<N1>(anyJoint(c));
+    }
+
+    //@}
+
+
+  public:
+
+    ///\name Ordered topological queries
+    //@{
+
+    /**
+     * Get the oriented neighbors of the cell \c c
+     */
+    template <int N1>
+    Chain<typename ncell_t<N1>::cell_t>
+    orientedAdjacentCells(const CELL_TYPE(N1,Self)& c) const
+    {
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_coface_flip_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+
+      Chain<l_cell_t> result;
+
+      const std::set<l_coface_flip_t*>& matches = match(Q,c,Q,Q);
+      forall l_coface_flip_t* pf in matches:
+      {
+        l_cell_t c1 = pf->otherFace(c);
+        if(!result.contains(c1))
+          result.insert(-relativeOrientation(c, pf->joint) * relativeOrientation(c1, pf->joint) * c1);
+      }
+
+      return result;
+    }
+
+    /**
+     * Returns the oriented boundary of a chain
+     */
+    template <int N1>
+    Chain<typename ncell_t<N1-1>::cell_t>
+    boundary(const Chain<CELL_TYPE(N1,Self)>& chain) const
+    {
+      typedef typename ncell_t<N1>::oriented_cell_t l_oriented_cell_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      Chain<l_face_t> result;
+      forall const l_oriented_cell_t& oc in chain:
+        result |= boundary(oc);
+      return result;
+    }
+
+    /**
+     * Returns the oriented boundary of an oriented vertex
+     */
+    Chain<bottom_t> boundary(const typename vertex_t::oriented_cell_t& v) const
+    {
+      Chain<bottom_t> result;
+      if(hasCell(~v))
+        result.insert(typename bottom_t::oriented_cell_t(_, v.orientation()));
+      return result;
+    }
+
+    /**
+     * Return the oriented boundary of an oriented cell
+     */
+    template <int N1>
+    Chain<CELL_TYPE(N1-1,Self) >
+    boundary(const OrientedObject<CELL_TYPE(N1,Self)>& oc) const
+    {
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      typedef typename ncell_t<N1-1>::oriented_cell_t l_oriented_face_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_top_cell_flip_t;
+      Chain<l_face_t> result;
+      RelativeOrientation ro = oc.orientation();
+      forall const l_face_t& f in bounds(~oc):
+        result.insert(ro*relativeOrientation(~oc, f)*f);
+      return result;
+    }
+
+    /**
+     * Get the oriented edge from \c src to \c tgt
+     *
+     * \returns \c +e if \c e is an edge from \c src to \c tgt, \c -e if \c e is an edge from \c tgt to \c src, a null 
+     * edge otherwise.
+     */
+    oriented_edge_t orientedEdge(const vertex_t& src, const vertex_t& tgt) const
+    {
+      typedef typename ncell_t<1>::cell_flip_t l_cell_flip_t;
+      std::set<l_cell_flip_t*> matches = match(Q, tgt, src, Q);
+      if(!matches.empty())
+        {
+          l_cell_flip_t* pf = *matches.begin();
+          if(pf->face1 == tgt)
+            return +pf->cell;
+          else
+            return -pf->cell;
+        }
+      return oriented_edge_t(edge_t::null, invalid);
+    }
+
+    /**
+     * Return the ordered list of joints of an oriented N1-cell.
+     *
+     * The orientation is fixed by a (N1-3)-bound
+     */
+    template <int N1>
+    std::vector<typename ncell_t<N1-2>::cell_t> orderedJoints(const OrientedObject<CELL_TYPE(N1,Self)>& oc,
+                                                              const CELL_TYPE(N1-3,Self)& jj) const
+    {
+      typedef typename ncell_t<N1>::oriented_cell_t l_oriented_cell_t;
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      typedef typename ncell_t<N1-2>::cell_t l_joint_t;
+
+      std::vector<l_joint_t> result;
+
+      forall const l_joint_t& j in cobounds(jj):
+      {
+        const std::set<l_cell_flip_t*>& matches = match(~oc,Q,Q,j);
+        if(!matches.empty())
+        {
+          result.reserve(matches.size());
+          l_cell_flip_t* pf = *matches.begin();
+          l_face_t prev_face = pf->face1;
+          l_face_t next_face = pf->face2;
+          if(oc.orientation() == neg)
+            std::swap(prev_face, next_face);
+          l_joint_t cur = pf->joint;
+          l_joint_t start(cur);
+          do
+          {
+            result.push_back(cur);
+            cur = flip(next_face, cur, jj);
+            next_face = flip(~oc, next_face, cur);
+          } while(cur != start);
+          break;
+        }
+      }
+
+      return result;
+    }
+
+    /**
+     * Return the ordered list of cojoints of an oriented N1-cell.
+     *
+     * The orientation is fixed by a (N1+3)-cobound
+     */
+    template <int N1>
+    std::vector<typename ncell_t<N1>::cell_t> orderedCojoints(const OrientedObject<CELL_TYPE(N1,Self)>& oj,
+                                                              const CELL_TYPE(N1+3,Self)& cc) const
+    {
+      typedef typename ncell_t<N1>::oriented_cell_t l_oriented_cell_t;
+      typedef typename ncell_t<N1+2>::cell_flip_t l_cojoint_flip_t;
+      typedef typename ncell_t<N1+1>::cell_t l_coface_t;
+      typedef typename ncell_t<N1+2>::cell_t l_cojoint_t;
+
+      forall const l_cojoint_t& cj in bounds(cc):
+        {
+          const std::set<l_cojoint_flip_t*>& matches = match(cj,Q,Q,~oj);
+          if(!matches.empty())
+            {
+              std::vector<l_cojoint_t> result;
+              result.reserve(matches.size());
+              l_cojoint_flip_t* pf = *matches.begin();
+              l_coface_t prev_face = pf->face2;
+              l_coface_t next_face = pf->face1;
+              if(oj.orientation() == neg)
+                std::swap(prev_face, next_face);
+              l_cojoint_t cur = pf->cell;
+              l_cojoint_t start(cur);
+              do
+                {
+                  result.push_back(cur);
+                  cur = flip(cc, cur, next_face);
+                  next_face = flip(cur, next_face, ~oj);
+                } while(cur != start);
+            }
+        }
+    }
+
+
+    /**
+     * Return the ordered list of the vertices of an oriented 2-cell
+     *
+     * The vector is such that two successive vertices define an edge oriented with the 2-cell
+     */
+    std::vector<vertex_t> orderedVertices(const typename ncell_t<2>::oriented_cell_t& of) const
+    {
+      typedef typename ncell_t<2>::oriented_cell_t l_oriented_cell_t;
+      typedef typename ncell_t<2>::cell_flip_t l_cell_flip_t;
+      const std::set<l_cell_flip_t*>& matches = match(~of,Q,Q,Q);
+      std::vector<vertex_t> result(matches.size(), vertex_t(0));
+      if(matches.empty()) return result;
+      l_cell_flip_t cf = **matches.begin();
+      edge_t prev_edge = cf.face1;
+      edge_t next_edge = cf.face2;
+      if(of.orientation() == neg)
+        std::swap(next_edge, prev_edge);
+      for(size_type i = 0 ; i < matches.size() ; ++i)
+      {
+        result[i] = cf.joint;
+        std::set<l_cell_flip_t*> nextMatches = match(cellFlip(~of,next_edge,Q,Q), matches);
+        typename std::set<l_cell_flip_t*>::iterator fiter = nextMatches.begin();
+        if((*fiter)->otherFace(next_edge) == prev_edge) fiter++;
+        cf = **fiter;
+        prev_edge = next_edge;
+        next_edge = cf.otherFace(prev_edge);
+      }
+      return result;
+    }
+    /*
+    std::vector<vertex_t> orderedVertices(const typename ncell_t<2>::oriented_cell_t& of) const
+    {
+      typedef typename ncell_t<2>::oriented_cell_t l_oriented_cell_t;
+      typedef typename ncell_t<2>::cell_flip_t l_cell_flip_t;
+      const std::set<l_cell_flip_t*>& matches = match(~of,Q,Q,Q);
+      l_cell_flip_t* pf = *matches.begin();
+      std::vector<vertex_t> result(matches.size(), vertex_t(0));
+      edge_t prev_edge = pf->face1;
+      edge_t next_edge = pf->face2;
+      if(of.orientation() == neg)
+        std::swap(next_edge, prev_edge);
+      vertex_t cur = pf->joint;
+      for(size_type i = 0 ; i < matches.size() ; ++i)
+      {
+        result[i] = cur;
+        cur = flip(next_edge, cur, _);
+        next_edge = flip(~of, next_edge, cur);
+      }
+      return result;
+    }
+    */
+
+    /**
+     * Return the pair of vertices defining the end points of the edges \c e.
+     *
+     * The edge is defined by <tt>{+endPoints(e).first, -endPoints(e).second}</tt>
+     *
+     * If the edge doesn't exist, both are null
+     */
+    std::pair<vertex_t,vertex_t> orderedVertices(const oriented_edge_t& oe) const
+    {
+      typedef typename ncell_t<1>::cell_flip_t l_edge_flip_t;
+      std::pair<vertex_t,vertex_t> result = { vertex_t(0), vertex_t(0) };
+      std::set<l_edge_flip_t*> m = match(~oe,Q,Q,Q);
+      if(!m.empty())
+        {
+          switch(oe.orientation())
+            {
+            case pos:
+              result.first = (*m.begin())->face1;
+              result.second = (*m.begin())->face2;
+              break;
+            case neg:
+              result.first = (*m.begin())->face2;
+              result.second = (*m.begin())->face1;
+              break;
+            default:
+              break;
+            }
+        }
+      return result;
+    }
+
+    /**
+     * Returns the source of the oriented edge \c oe, if any
+     */
+    const vertex_t& source(const oriented_edge_t& oe) const
+    {
+      typedef typename ncell_t<1>::cell_flip_t l_edge_flip_t;
+      const std::set<l_edge_flip_t*>& matches = match(~oe,Q,Q,Q);
+      if(not matches.empty())
+      {
+        switch(oe.orientation())
+        {
+          case pos:
+            return (*matches.begin())->face2;
+          case neg:
+            return (*matches.begin())->face1;
+          default:
+            return vertex_t::null;
+        }
+      }
+      else
+        return vertex_t::null;
+    }
+
+    /**
+     * Returns the target of the oriented edge \c oe, if any
+     */
+    const vertex_t& target(const oriented_edge_t& oe) const
+    {
+      typedef typename ncell_t<1>::cell_flip_t l_edge_flip_t;
+      const std::set<l_edge_flip_t*>& matches = match(~oe,Q,Q,Q);
+      if(not matches.empty())
+      {
+        switch(oe.orientation())
+        {
+          case pos:
+            return (*matches.begin())->face1;
+          case neg:
+            return (*matches.begin())->face2;
+          default:
+            return vertex_t::null;
+        }
+      }
+      else
+        return vertex_t::null;
+    }
+
+    /**
+     * Return the oriented co-boundary of an oriented cell
+     *
+     * The co-boundary is the set of cells for which this cell is a face
+     */
+    Chain<top_t> coboundary(const oriented_cell_t& oc) const
+    {
+      Chain<top_t> result;
+      if(hasCell(~oc))
+        result.insert(oriented_cell_t(T, oc.orientation()*relativeOrientation(T,~oc)));
+      return result;
+    }
+
+    /**
+     * Return the co-boundary of the bottom cell
+     * \note this is the chain of all the vertices oriented positively
+     */
+    Chain<vertex_t> coboundary(const bottom_t& ) const
+    {
+      return Chain<vertex_t>(vertices());
+    }
+
+    /**
+     * Return the oriented co-boundary of an oriented cell
+     *
+     * The co-boundary is the set of cells for which this cell is a face
+     */
+    template <int N1>
+    Chain<CELL_TYPE(N1+1, Self)>
+    coboundary(const OrientedObject<CELL_TYPE(N1, Self)>& of) const
+    {
+      STATIC_ASSERT(N1 >= 0 and N1 < N, "You cannot only ask for the coboundary of a cell of dimension between -1 and N.");
+      typedef typename ncell_t<N1+1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1+1>::oriented_cell_t l_oriented_cell_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_cell_flip_t;
+      Chain<l_cell_t> result;
+      const std::set<l_cell_flip_t*>& matches = match(Q,~of,Q,Q);
+      RelativeOrientation ro = of.orientation();
+      forall l_cell_flip_t* pf in matches:
+      {
+        l_oriented_cell_t oc = ro*relativeOrientation(pf->cell, ~of)*pf->cell;
+        if(!result.contains(oc))
+          result.insert(oc);
+      }
+      return result;
+    }
+
+    //@}
+
+    ///\name Edition methods
+    //@{
+
+    /**
+     * Add a vertex to the cell complex
+     */
+    bool addVertex(const vertex_t& v)
+    {
+      return get_layer<0>(*this).addVertex(v);
+    }
+
+    /**
+     * Remove a vertex \c v, as long as it's not part of any edge
+     */
+    bool removeVertex(const vertex_t& v)
+    {
+      if(!match(Q,v,Q,Q).empty())
+        return false;
+      return get_layer<0>(*this).removeVertex(v);
+    }
+
+    /**
+     * Add a cell given its oriented neighborhood
+     *
+     * \param cell Chain describing the boundary of the new cell
+     * \param nc If non-null, name of the cell to be created. It cannot be already in the cell complex
+     * \param link_to_top When adding a \f$ N\f$ -cell, will also link the cell to the top cell T. For any other \f$ k\f$ 
+     * -cell, \f$ k<N\f$ , this parameter has no effect.
+     */
+    template <int N1>
+    typename ncell_t<N1+1>::cell_t
+    addCell(const Chain<CELL_TYPE(N1,Self)>& cell,
+            const typename ncell_t<N1+1>::cell_t& nc = ncell_t<N1+1>::cell_t::null,
+            bool link_to_top = true)
+    {
+      STATIC_ASSERT(N1>=0 and N1 <= N, "You can only add cell of dimension from 0 to N.");
+      typedef typename ncell_t<N1>::cell_t l_face_t;
+      typedef typename ncell_t<N1+1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1-1>::cell_t l_joint_t;
+      typedef typename l_face_t::oriented_cell_t l_oriented_face_t;
+      typedef typename l_joint_t::oriented_cell_t l_oriented_joint_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1+2>::cell_flip_t l_top_cell_flip_t;
+
+      if(nc)
+      {
+        if(this->contains(nc))
+        {
+          error = CELL_ALREADY_IN_COMPLEX;
+          return l_cell_t::null;
+        }
+      }
+
+      l_cell_t c(nc, true);
+
+      // Store the flips in construction
+      std::unordered_map<l_joint_t,l_cell_flip_t> flips;
+      std::list<l_top_cell_flip_t> top_flips;
+
+      if(!addCellChecks<N1>(cell, c, flips, top_flips))
+        return l_cell_t::null;
+
+      // Now, write the flips
+      forall const auto& p in flips:
+        addFlip(p.second);
+
+      if(link_to_top)
+      {
+        forall const l_top_cell_flip_t& cf in top_flips:
+          addFlip(cf);
+      }
+
+      // Now, add the relative orientations
+      setCellOrientations(c, cell);
+
+      return c;
+    }
+
+    /**
+     * \overload
+     */
+    template <typename CellType>
+    typename ncell_t<CellType::N+1>::cell_t
+    addCell(const std::initializer_list<OrientedObject<CellType> >& cell,
+            bool link_to_top = true)
+    {
+      return addCell(chain(cell), ncell_t<CellType::N+1>::cell_t::null, link_to_top);
+    }
+
+    /**
+     * \overload
+     */
+    template <typename CellType>
+    typename ncell_t<CellType::N+1>::cell_t
+    addCell(const std::initializer_list<OrientedObject<CellType> >& cell,
+            const typename ncell_t<CellType::N+1>::cell_t& nc,
+            bool link_to_top = true)
+    {
+      return addCell(chain(cell), nc, link_to_top);
+    }
+
+    /**
+     * \overload
+     *
+     * In addition, this method detect if the container contains oriented or non-oriented cell
+     */
+    template <typename Container>
+    typename Container::value_type::cell_t
+    addCell(const Container& cell, bool link_to_top = true)
+    {
+      return addCell(cell, Container::value_type::cell_t::null, link_to_top, typename is_oriented_type<typename Container::value_type>::type());
+    }
+
+    /**
+     * \overload
+     *
+     * In addition, this method detect if the container contains oriented or non-oriented cell
+     */
+    template <typename Container>
+    typename Container::value_type::cell_t
+    addCell(const Container& cell, const typename Container::value_type::cell_t& nc, bool link_to_top = true)
+    {
+      return addCell(cell, nc, link_to_top, typename is_oriented_type<typename Container::value_type>::type());
+    }
+
+    /**
+     * Remove a \f$k\f$-cell, \f$k<N\f$
+     *
+     * The cell must not be connected to any cell of higher dimension to be removable.
+     */
+    template <int N1>
+    bool removeCell(const CELL_TYPE(N1,Self)& c)
+    {
+      STATIC_ASSERT(0 < N1 and N1 <= N, "Error, cannot only remove cell from dimensions 1 to N.");
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      if(!match(Q,c,Q,Q).empty())
+        {
+          error = CELL_IS_A_FACE;
+          return false;
+        }
+      CellSet<l_face_t> faces;
+      std::set<l_cell_flip_t*> matches = match(c, Q, Q, Q);
+      forall l_cell_flip_t* pf in matches:
+      {
+        faces.insert(pf->face1);
+        faces.insert(pf->face2);
+        removeFlip(pf);
+      }
+
+      forall const l_face_t& f in faces:
+        if(match(Q,f,Q,Q).empty())
+          removeCell(f);
+
+      return true;
+    }
+
+    /**
+     * Remove a 0-cell (i.e. a vertex)
+     *
+     * The vertex must not be connected to any edge to be removable.
+     */
+    bool removeCell(const vertex_t& v)
+    {
+      return removeVertex(v);
+    }
+
+    /**
+     * Remove a \f$N\f$-cell
+     *
+     * In effect, this method disconnect the cell from the top cell if needed and then call the other addCell.
+     */
+    bool removeCell(const cell_t& c)
+    {
+      // First, copy the set of flips
+      std::set<cell_flip_t*> matches = match(Q,c,Q,Q);
+      // To remove them all
+      forall cell_flip_t* pf in matches:
+      removeFlip(pf);
+      // Call explicitly the template version
+      return removeCell<N>(c);
+    }
+
+    /**
+     * Split an edge
+     */
+    SplitResult<1> splitEdge(const edge_t& e,
+                             const SplitResult<1>& def = SplitResult<1>())
+    {
+      typedef typename ncell_t<2>::cell_flip_t l_top_cell_flip_t;
+      typedef typename ncell_t<1>::cell_flip_t l_cell_flip_t;
+      SplitResult<1> result;
+      edge_t el(def.left, true);
+      edge_t er(def.right, true);
+      vertex_t v(def.membrane, true);
+      vertex_t v1(0), v2(0);
+
+      std::list<l_cell_flip_t> to_add;
+      std::list<l_cell_flip_t*> to_remove;
+
+      const std::set<l_cell_flip_t*>& m_boundary = match(e,Q,Q,Q);
+      if(m_boundary.empty())
+        {
+          error = NO_SUCH_CELL;
+          return result;
+        }
+      else if(m_boundary.size() > 1)
+        {
+          error = STRUCTURE_INVALID;
+          return result;
+        }
+
+      forall l_cell_flip_t* pf in m_boundary:
+      {
+        // We will assume the face is from v1 to v2, so the flip is (e<v2,v1>_)
+        v1 = pf->face2;
+        v2 = pf->face1;
+
+        l_cell_flip_t cf1 = *pf;
+        cf1.cell = el;
+        cf1.face1 = v;
+
+        l_cell_flip_t cf2 = *pf;
+        cf2.cell = er;
+        cf2.face2 = v;
+
+        to_remove.push_back(pf);
+        to_add.push_back(cf1);
+        to_add.push_back(cf2);
+      }
+
+      addVertex(v);
+
+      forall const l_cell_flip_t& cf in to_add:
+        addFlip(cf);
+
+      setRelativeOrientation(el, v, pos);
+      setRelativeOrientation(er, v2, pos);
+      setRelativeOrientation(el, v1, neg);
+      setRelativeOrientation(er, v, neg);
+
+      updateTopRelativeOrientations(e, el, er);
+
+      removeCellOrientations(e);
+
+      forall l_cell_flip_t* pf in to_remove:
+      removeFlip(pf);
+
+      splitEdgeNeighbors(e, v, el, v1, er);
+      splitEdgeNeighbors(e, v, er, v2, edge_t::null);
+
+      splitVolume<1>(e,el,er);//, typename test_type<(N>1)>::type());
+
+      result.left = el;
+      result.right = er;
+      result.membrane = v;
+      return result;
+    }
+
+    /**
+     * Split a cell using a boundary
+     */
+    template <int N1>
+    SplitResult<N1> splitCell(const CELL_TYPE(N1,Self)& cell,
+                              const std::initializer_list<typename ncell_t<N1-2>::oriented_cell_t>& mBoundary,
+                              const SplitResult<N1>& def = SplitResult<N1>())
+    {
+      return splitCell(cell, chain(mBoundary), def);
+    }
+
+    /**
+     * Specialization of splitCell to split an edge.
+     *
+     * \note the boundary is ignored as it has to be {_}
+     */
+    SplitResult<1> splitCell(const edge_t& e, const Chain<bottom_t>& mBoundary, const SplitResult<1>& def = SplitResult<1>())
+    {
+      Q_UNUSED(mBoundary);
+      return splitEdge(e, def);
+    }
+
+    /**
+     * Split a cell using a boundary
+     */
+    template <int N1>
+    SplitResult<N1> splitCell(const CELL_TYPE(N1,Self)& cell,
+                              const Chain<typename ncell_t<N1-2>::cell_t>& mBoundary,
+                              const SplitResult<N1>& def = SplitResult<N1>())
+    {
+      typedef typename ncell_t<N1+1>::cell_t l_coface_t;
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename l_cell_t::oriented_cell_t l_oriented_cell_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      typedef typename l_face_t::oriented_cell_t l_oriented_face_t;
+      typedef typename ncell_t<N1-2>::cell_t l_joint_t;
+      typedef typename l_joint_t::oriented_cell_t l_oriented_joint_t;
+      typedef typename ncell_t<N1-3>::cell_t l_m_joint_t;
+      typedef typename l_m_joint_t::oriented_cell_t l_oriented_m_joint_t;
+
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1-1>::cell_flip_t l_face_flip_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_coface_flip_t;
+
+      SplitResult<N1> result;
+
+      l_cell_t cl(def.left, true);
+      l_cell_t cr(def.right, true);
+      l_face_t m(def.membrane, true);
+
+      // First, get the flips to add the membrane
+
+      std::unordered_map<l_m_joint_t,l_face_flip_t> face_flips;
+      std::list<l_cell_flip_t> cell_flips;
+      std::list<l_cell_flip_t*> del_cell_flips;
+      std::list<l_coface_flip_t> top_flips;
+      std::list<l_coface_flip_t*> del_top_flips;
+
+      if(!addCellChecks(mBoundary, m, face_flips, cell_flips))
+        return result;
+
+      // Now, get the sides and check the membrane is in the cell
+      CellSet<l_joint_t> unseen_membrane(mBoundary);
+      const std::set<l_cell_flip_t*>& matches = match(cell,Q,Q,Q);
+      std::unordered_map<l_face_t,int> face_group;
+      std::vector<int> group_equiv;
+      group_equiv.reserve(matches.size());
+      l_face_t facel(0); // Face in the left cell
+      // Group the faces
+      forall l_cell_flip_t* pf in matches:
+      {
+        if(!mBoundary.contains(pf->joint))
+          {
+            int gl, gr;
+            auto findl = face_group.find(pf->face1);
+            if(findl != face_group.end())
+              {
+                gl = group_equiv[findl->second];
+                while(gl != group_equiv[gl]) gl = group_equiv[gl];
+              }
+            else
+              {
+                gl = group_equiv.size();
+                group_equiv.push_back(gl);
+                findl = face_group.insert(std::make_pair(pf->face1, gl)).first;
+              }
+            auto findr = face_group.find(pf->face2);
+            if(findr != face_group.end())
+              {
+                gr = group_equiv[findr->second];
+                while(gr != group_equiv[gr]) gr = group_equiv[gr];
+              }
+            else
+              {
+                gr = group_equiv.size();
+                group_equiv.push_back(gr);
+                findr = face_group.insert(std::make_pair(pf->face2, gr)).first;
+              }
+            int grp = std::min(gl, gr);
+#ifdef DEBUG_OUTPUT
+            out << gl << "[" << findl->second << "] <=> "
+                << gr << "[" << findr->second << "] => "
+                << (grp < gl ? QString::number(gl) : QString()) << "/"
+                << (grp < gr ? QString::number(gr) : QString())
+                << " -> " << grp << endl;
+#endif
+            if(grp < gl)
+              group_equiv[gl] = grp;
+            if(grp < gr)
+              group_equiv[gr] = grp;
+            findl->second = grp;
+            findr->second = grp;
+          }
+        else
+          {
+            unseen_membrane.erase(pf->joint);
+            if(face_group.find(pf->face1) == face_group.end())
+              {
+                face_group[pf->face1] = group_equiv.size();
+                group_equiv.push_back(group_equiv.size());
+              }
+            if(face_group.find(pf->face2) == face_group.end())
+              {
+                face_group[pf->face2] = group_equiv.size();
+                group_equiv.push_back(group_equiv.size());
+              }
+            if(not facel)
+              {
+                DEBUG_OUT("Deciding facel on " << *pf << endl);
+                l_oriented_joint_t oj = *mBoundary.find(pf->joint);
+                if(oj.orientation() == neg)
+                  facel = pf->face1;
+                else
+                  facel = pf->face2;
+              }
+          }
+      }
+      if(!unseen_membrane.empty())
+        {
+          error = MEMBRANE_NOT_IN_CELL;
+          return result;
+        }
+      if(!facel)
+        {
+          error = MEMBRANE_NOT_IN_CELL;
+          return result;
+        }
+      DEBUG_OUT("facel = " << facel << endl);
+      // Compact the group
+      int gl = -1, gr = -1;
+      for(int i = 0 ; i < (int)group_equiv.size() ; ++i)
+        {
+          int grp = group_equiv[group_equiv[i]];
+          group_equiv[i] = grp;
+          if(gl < 0)
+            gl = grp;
+          else if(gl != grp)
+            {
+              if(gr < 0)
+                gr = grp;
+              else if(gr != grp)
+                {
+#ifdef DEBUG_OUTPUT
+                  out << "group_equiv:";
+                  for(int i= 0 ; i < group_equiv.size() ; ++i)
+                    out << " " << i << ":" << group_equiv[i];
+                  out << endl;
+#endif
+                  error = MEMBRANE_DOESNT_CUT_CELL_IN_TWO;
+                  return result;
+                }
+            }
+        }
+
+      // Check gl is really the left cell
+      if(gl != group_equiv[face_group[facel]])
+        std::swap(gl, gr);
+
+      // Now, get the list of face per cell
+      CellSet<l_face_t> cell_l, cell_r;
+      forall const auto& pf in face_group:
+        {
+          if(group_equiv[face_group[pf.first]] == gl)
+            cell_l.insert(pf.first);
+          else
+            cell_r.insert(pf.first);
+        }
+
+#ifdef DEBUG_OUTPUT
+      out << "Faces of cell l " << cl << ": ";
+      forall const l_face_t& f in cell_l:
+        out << shortString(f) << " ";
+      out << endl;
+      out << "Faces of cell r " << cr << ": ";
+      forall const l_face_t& f in cell_r:
+        out << shortString(f) << " ";
+      out << endl;
+#endif
+
+      // Next, dimension n flips
+      {
+        const std::set<l_cell_flip_t*>& matches = match(cell,Q,Q,Q);
+        forall l_cell_flip_t* pf in matches:
+        {
+          DEBUG_OUT("Processing flip " << *pf << endl);
+          if(cell_l.find(pf->face1) != cell_l.end() and
+             cell_l.find(pf->face2) != cell_l.end())
+            {
+              DEBUG_OUT("   - in cell l" << endl);
+              l_cell_flip_t nf = *pf;
+              nf.cell = cl;
+              DEBUG_OUT("  => inserting flip " << nf << endl);
+              cell_flips.push_back(nf);
+            }
+          else if(cell_r.find(pf->face1) != cell_r.end() and
+                  cell_r.find(pf->face2) != cell_r.end())
+            {
+              DEBUG_OUT("   - in cell r" << endl);
+              l_cell_flip_t nf = *pf;
+              nf.cell = cr;
+              DEBUG_OUT("  => inserting flip " << nf << endl);
+              cell_flips.push_back(nf);
+            }
+          else if(cell_l.find(pf->face1) != cell_l.end())
+            {
+              DEBUG_OUT("   - " << pf->face1 << " in cell_l and " << pf->face2 << " in cell_r" << endl);
+              l_cell_flip_t nf1 = *pf;
+              l_cell_flip_t nf2 = *pf;
+              nf1.cell = cl;
+              nf1.face2 = m;
+              nf2.cell = cr;
+              nf2.face1 = m;
+              DEBUG_OUT("  => inserting flips " << nf1 << " - " << nf2 << endl);
+              cell_flips.push_back(nf1);
+              cell_flips.push_back(nf2);
+            }
+          else
+            {
+              DEBUG_OUT("   - " << pf->face2 << " in cell_l and " << pf->face1 << " in cell_r" << endl);
+              l_cell_flip_t nf1 = *pf;
+              l_cell_flip_t nf2 = *pf;
+              nf1.cell = cl;
+              nf1.face1 = m;
+              nf2.cell = cr;
+              nf2.face2 = m;
+              DEBUG_OUT("  => inserting flips " << nf1 << " - " << nf2 << endl);
+              cell_flips.push_back(nf1);
+              cell_flips.push_back(nf2);
+            }
+          del_cell_flips.push_back(pf);
+        }
+      }
+
+      // Now, dimension n+1 flips
+      {
+        CellSet<l_coface_t> volumes;
+        const std::set<l_coface_flip_t*>& matches = match(Q,cell,Q,Q);
+        forall l_coface_flip_t* pf in matches:
+        {
+          if(cell_l.find(pf->joint) != cell_l.end())
+            {
+              l_coface_flip_t nf = *pf;
+              nf.replaceFace(cell, cl);
+              top_flips.push_back(nf);
+            }
+          else
+            {
+              l_coface_flip_t nf = *pf;
+              nf.replaceFace(cell, cr);
+              top_flips.push_back(nf);
+            }
+          del_top_flips.push_back(pf);
+          if(volumes.find(pf->cell) == volumes.end())
+            {
+              top_flips.push_back(relativeOrientation(pf->cell, cell) * cellFlip(pf->cell, cl, cr, m));
+              volumes.insert(pf->cell);
+            }
+        }
+        // In case we are in top-dimension and the cell has no neighbors
+        if(matches.empty())
+          {
+            forall const l_coface_t& vol in cobounds(cell):
+              top_flips.push_back(relativeOrientation(vol, cell) * cellFlip(vol, cl, cr, m));
+          }
+      }
+
+      // All is good: write the flips for the membrane
+      forall const auto& p in face_flips:
+        addFlip(p.second);
+      // Add the orientation for the membrane
+      addMembraneOrientations(m, mBoundary, cl, cr);
+
+      // update the orientations
+      updateRelativeOrientations(cell, cl, cell_l, cr, cell_r);
+
+      removeCellOrientations(cell);
+
+      forall l_cell_flip_t* pf in del_cell_flips:
+      removeFlip(pf);
+      forall const l_cell_flip_t& cf in cell_flips:
+        addFlip(cf);
+      forall l_coface_flip_t* pf in del_top_flips:
+      removeFlip(pf);
+      forall const l_coface_flip_t& cf in top_flips:
+        addFlip(cf);
+
+      updateSTopFlips(cell, cl, cr);
+
+      result.left = cl;
+      result.right = cr;
+      result.membrane = m;
+      return result;
+    }
+
+
+    /**
+     * Replace a chain with another one of same boundary.
+     */
+    template <int N1>
+    bool replace(const Chain<CELL_TYPE(N1,Self)>& C1,
+                 const Chain<CELL_TYPE(N1,Self)>& C2)
+    {
+      typedef typename ncell_t<N1+1>::cell_flip_t l_coface_flip_t;
+      typedef typename ncell_t<N1+1>::cell_t l_coface_t;
+      typedef typename ncell_t<N1+1>::oriented_cell_t l_oriented_coface_t;
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1>::oriented_cell_t l_oriented_cell_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      typedef typename ncell_t<N1-1>::oriented_cell_t l_oriented_face_t;
+      typedef typename ncell_t<N1-2>::cell_t l_joint_t;
+      // First, check that the cells in C2 are never in face position
+      forall const l_oriented_cell_t& oc in C2:
+        {
+          if(!match(Q,~oc,Q,Q).empty())
+            {
+              error = CELL_IS_A_FACE;
+              return false;
+            }
+        }
+      // Now, check the boundaries of C1 and C2
+      Chain<l_face_t> bs = boundary(C1);
+      if(bs != boundary(C2))
+        {
+          error = WRONG_BOUNDARY;
+          return false;
+        }
+      /*
+       * // Now, check the joints not at the boundary of C1
+       *if(C1.size() != 1)
+       *{
+       *  forall const l_joint_t& j in joints(C1): if(!bs.contains(j))
+       *  {
+       *    forall const l_face_t& f in cofaces(j):
+       *    {
+       *      if(!C1.contains(f))
+       *      {
+       *        error = CHAIN_CONNECTED_INSIDE;
+       *        return false;
+       *      }
+       *    }
+       *  }
+       *}
+       * // Now, check the joints not at the boundary of C2
+       *if(C2.size() != 1)
+       *{
+       *  forall const l_joint_t& j in joints(C2): if(!bs.contains(j))
+       *  {
+       *    forall const l_face_t& f in cofaces(j):
+       *    {
+       *      if(!C2.contains(f))
+       *      {
+       *        error = CHAIN_CONNECTED_INSIDE;
+       *        return false;
+       *      }
+       *    }
+       *  }
+       *}
+       */
+      std::unordered_map<l_face_t,std::pair<l_oriented_cell_t,l_oriented_cell_t> > boundary_map;
+      // Associate the boundary element to the elements inside C1 and C2
+      forall const l_oriented_cell_t& oc in C1:
+        {
+          const CellSet<l_face_t>& fs = faces(~oc);
+          forall const l_face_t& f in fs:
+            if(bs.contains(f))
+              {
+                boundary_map[f].first = oc;
+              }
+        }
+      forall const l_oriented_cell_t& oc in C2:
+        {
+          const CellSet<l_face_t>& fs = faces(~oc);
+          forall const l_face_t& f in fs:
+            if(bs.contains(f))
+              {
+                boundary_map[f].second = oc;
+              }
+        }
+      // add and remove inside flips
+      std::set<l_coface_flip_t> to_add;
+      std::set<l_coface_flip_t*> to_delete;
+
+      // First find flips at the boundary
+      forall auto bpe in boundary_map:
+        {
+          l_face_t f = bpe.first;
+          l_cell_t c1 = ~bpe.second.first;
+          l_cell_t c2 = ~bpe.second.second;
+          std::set<l_coface_flip_t*> m = match(Q,c1,Q,f);
+          forall l_coface_flip_t* pf in m:
+          {
+            l_coface_flip_t nf(*pf);
+            nf.replaceFace(c1, c2);
+            to_add.insert(nf);
+          }
+        }
+
+      const l_oriented_cell_t& ref = C1.any();
+      Chain<l_coface_t> cbs = coboundary(ref);
+
+      // Prepare removal of $k+1$-flips containing cells in C1
+      forall const l_oriented_cell_t& oc in C1:
+        {
+          std::set<l_coface_flip_t*> m = match(Q, ~oc, Q, Q);
+          forall l_coface_flip_t* pf in m:
+          {
+            to_delete.insert(pf);
+          }
+        }
+
+      std::unordered_map<l_face_t,std::pair<l_cell_t,l_cell_t> > inside_flips;
+
+      // Prepare cell-orientations
+
+      // Prepare $k+1$-flips with cells of C2 only
+      forall const l_oriented_cell_t& oc in C2:
+        {
+          forall const l_face_t& f in bounds(~oc): if(!bs.contains(f))
+            {
+              auto found = inside_flips.find(f);
+              if(found != inside_flips.end())
+                {
+                  if(found->second.second)
+                    {
+                      error = CHAIN_CONNECTED_INSIDE;
+                      return false;
+                    }
+                  else
+                    {
+                      found->second.second = ~oc;
+                    }
+                }
+              else
+                inside_flips[f] = std::make_pair(~oc, l_cell_t(0));
+            }
+        }
+
+      forall auto ife in inside_flips:
+        {
+          l_cell_t f1 = ife.second.first;
+          l_cell_t f2 = ife.second.second;
+          l_face_t j = ife.first;
+          forall const l_oriented_coface_t& ocf in cbs:
+            {
+              l_coface_flip_t nf(~ocf, f1, f2, j);
+              RelativeOrientation cor = ocf.orientation();
+              RelativeOrientation f1or = C2.find(f1)->orientation();
+              if(cor*f1or != relativeOrientation(f1, j))
+                nf.reverse();
+              to_add.insert(nf);
+            }
+        }
+
+      if(!_replaceSuperTopFlips(C1, C2, typename test_type<(N1<N)>::type()))
+        return false;
+
+      bool success = true;
+
+      forall const l_oriented_cell_t& oc in C1:
+        forall const l_oriented_coface_t& ocf in cbs:
+          if(!removeRelativeOrientation(~ocf, ~oc))
+          {
+            error = UNKNOWN_CELL_ORIENTATION;
+            success = false;
+          }
+
+      forall l_coface_flip_t* pf in to_delete:
+      removeFlip(pf);
+
+      forall const l_coface_flip_t& nf in to_add:
+        addFlip(nf);
+
+      forall const l_oriented_coface_t& ocf in cbs:
+        setCellOrientations(~ocf, ocf.orientation() * C2);
+
+      return success;
+    }
+
+
+    //@}
+
+    ///\name General utility methods
+    //@{
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+
+#  define L_CELL_TYPE Cell<N1, typename NTypes<N1,Self>::cell_content_t>
+#  define L_FACE_TYPE Cell<N1-1, typename NTypes<N1-1,Self>::cell_content_t>
+#  define L_JOINT_TYPE Cell<N1-2, typename NTypes<N1-2,Self>::cell_content_t>
+#  define L_QUERY_TYPE QueryType
+
+#  define CELL_FLIP_FCT(N2, CT,FT1,FT2,JT)                                \
+    template <int N1>                                                        \
+    typename ncell_t<N1+N2>::cell_flip_t cellFlip(const CT& c,                \
+                                                  const FT1& f1,        \
+                                                  const FT2& f2,        \
+                                                  const JT& j) const        \
+    {                                                                        \
+      STATIC_ASSERT((N1+N2) > 0 and (N1+N2) <= N+1, "A flip's dimension must be between 1 and N+1."); \
+      return typename ncell_t<N1+N2>::cell_flip_t(c, f1, f2, j);        \
+    }
+
+    CELL_FLIP_FCT(0, L_CELL_TYPE, L_FACE_TYPE, L_FACE_TYPE, L_JOINT_TYPE)
+
+    CELL_FLIP_FCT(1, L_QUERY_TYPE, L_CELL_TYPE, L_CELL_TYPE, L_FACE_TYPE)
+    CELL_FLIP_FCT(0, L_CELL_TYPE, L_QUERY_TYPE, L_FACE_TYPE, L_JOINT_TYPE)
+    CELL_FLIP_FCT(0, L_CELL_TYPE, L_FACE_TYPE, L_QUERY_TYPE, L_JOINT_TYPE)
+    CELL_FLIP_FCT(0, L_CELL_TYPE, L_FACE_TYPE, L_FACE_TYPE, L_QUERY_TYPE)
+
+    CELL_FLIP_FCT(1, L_QUERY_TYPE, L_QUERY_TYPE, L_CELL_TYPE, L_FACE_TYPE)
+    CELL_FLIP_FCT(1, L_QUERY_TYPE, L_CELL_TYPE, L_QUERY_TYPE, L_FACE_TYPE)
+    CELL_FLIP_FCT(1, L_QUERY_TYPE, L_CELL_TYPE, L_CELL_TYPE, L_QUERY_TYPE)
+
+    CELL_FLIP_FCT(0, L_CELL_TYPE, L_QUERY_TYPE, L_QUERY_TYPE, L_JOINT_TYPE)
+    CELL_FLIP_FCT(0, L_CELL_TYPE, L_QUERY_TYPE, L_FACE_TYPE, L_QUERY_TYPE)
+
+    CELL_FLIP_FCT(0, L_CELL_TYPE, L_FACE_TYPE, L_QUERY_TYPE, L_QUERY_TYPE)
+
+    CELL_FLIP_FCT(0, L_CELL_TYPE, L_QUERY_TYPE, L_QUERY_TYPE, L_QUERY_TYPE)
+    CELL_FLIP_FCT(1, L_QUERY_TYPE, L_CELL_TYPE, L_QUERY_TYPE, L_QUERY_TYPE)
+    CELL_FLIP_FCT(1, L_QUERY_TYPE, L_QUERY_TYPE, L_CELL_TYPE, L_QUERY_TYPE)
+    CELL_FLIP_FCT(2, L_QUERY_TYPE, L_QUERY_TYPE, L_QUERY_TYPE, L_CELL_TYPE)
+
+#  undef L_CELL_TYPE
+#  undef L_FACE_TYPE
+#  undef L_JOINT_TYPE
+#  undef L_QUERY_TYPE
+#  undef CELL_FLIP_FCT
+#else // DOXYGEN_SHOULD_SKIP_THIS
+
+    /**
+     *
+     * This function returns a flip with the cell, faces and joint specified. Any one of the argument (but not all) can 
+     * be replaced by \c Q, the query value.
+     */
+    template <int N1>
+    typename ncell_t<N1>::cell_flip_t cellFlip(const typename ncell_t<N1>::cell_t& c, const typename ncell_t<N1-1>::cell_t& f1, const typename ncell_t<N1-1>::cell_t& f2, const typename ncell_t<N1-2>::cell_t& j)
+    {
+      // Implementation dependent on the arguments
+      return 0;
+    }
+
+#endif // DOXYGEN_SHOULD_SKIP_THIS
+
+    /**
+     * Orient a closed set of cells so it forms a valid boundary.
+     *
+     * If possible, the orientation of the (closed) boundary defines a N1+1-cell oriented like its neighbors.
+     */
+    template <int N1>
+    Chain<typename ncell_t<N1>::cell_t>
+    orientCell(CellSet<CELL_TYPE(N1,Self)> cell)
+    {
+      typedef typename ncell_t<N1>::cell_t l_face_t;
+      typedef typename ncell_t<N1+1>::cell_flip_t l_cell_flip_t;
+      typedef typename l_face_t::oriented_cell_t l_oriented_face_t;
+
+      l_oriented_face_t ref(l_face_t(0));
+
+      forall const l_face_t& f in cell:
+        {
+          const std::set<l_cell_flip_t*>& m = match(Q,f,Q,Q);
+          if(!m.empty())
+            {
+              l_cell_flip_t* pf = *m.begin();
+              ref = -relativeOrientation(pf->cell, f)*f;
+            }
+        }
+      if(!~ref)
+        ref = +cell.any();
+      return orientCell(std::move(cell), ref);
+    }
+
+    /**
+     * Orient a closed set of cells so it forms a valid boundary.
+     *
+     * The orientation is such as the reference is in the boundary
+     */
+    template <int N1>
+    Chain<typename ncell_t<N1>::cell_t>
+    orientCell(CellSet<CELL_TYPE(N1,Self)> cell,
+               const typename ncell_t<N1>::oriented_cell_t& ref)
+    {
+      typedef typename ncell_t<N1>::cell_t l_face_t;
+      typedef typename ncell_t<N1-1>::cell_t l_joint_t;
+      typedef typename ncell_t<N1>::cell_flip_t l_face_flip_t;
+      typedef typename l_face_t::oriented_cell_t l_oriented_face_t;
+
+      Chain<l_face_t> chain(ref);
+      cell.erase(~ref);
+
+      std::list<l_oriented_face_t> faces;
+      faces.push_back(ref);
+
+      while(!faces.empty())
+        {
+          l_oriented_face_t of1 = faces.front();
+          faces.pop_front();
+          CellSet<l_joint_t> js = bounds(~of1);
+          forall const l_joint_t& j in js:
+            {
+              std::list<l_face_t> to_delete;
+              forall const l_face_t& f2 in cell:
+                {
+                  std::set<l_face_flip_t*> m = match(f2, j, Q, Q);
+                  if(!m.empty())
+                    {
+                      l_oriented_face_t of2 = -of1.orientation()*relativeOrientation(~of1, j)*relativeOrientation(f2, j)*f2;
+                      faces.push_back(of2);
+                      chain.insert(of2);
+                      to_delete.push_back(f2);
+                    }
+                }
+              forall const l_face_t& f2 in to_delete:
+                cell.erase(f2);
+            }
+        }
+
+      if(!cell.empty())
+        {
+          error = CELL_BOUNDARY_MULTIPLE_PARTS;
+          chain.clear();
+          return chain;
+        }
+      return chain;
+    }
+
+    /**
+     * \overload
+     */
+    template <int N1>
+    Chain<typename ncell_t<N1>::cell_t>
+    orientCell(std::initializer_list<CELL_TYPE(N1,Self)> cell)
+    {
+      return orientCell(CellSet<CELL_TYPE(N1,Self)>(cell));
+    }
+
+    /**
+     * \overload
+     */
+    template <int N1>
+    Chain<typename ncell_t<N1>::cell_t>
+    orientCell(std::initializer_list<CELL_TYPE(N1,Self)> cell,
+               const typename ncell_t<N1>::oriented_cell_t& ref)
+    {
+      return orientCell(CellSet<CELL_TYPE(N1,Self)>(cell), ref);
+    }
+
+
+    /**
+     * Check the boundary, and provide hooks to gather information
+     * \param cell chain describing the cell to check
+     * \param face_fct hook that gets an oriented face as argument: called once per face in the cell
+     * \param joint_fct hook that gets an oriented joint. It's always called after face_fct for the face containing the 
+     * joint. The orientation of the joint depend on the orientation of the face.
+     */
+    template <typename CellType, typename FaceFctType, typename JointFctType>
+    bool checkLayer(const Chain<CellType>& cell,
+                       const FaceFctType& face_fct,
+                       const JointFctType& joint_fct)
+    {
+      typedef CellType l_face_t;
+      typedef typename ncell_t<l_face_t::N-1>::cell_t l_joint_t;
+      typedef typename ncell_t<l_face_t::N+1>::cell_t l_cell_t;
+      typedef typename l_face_t::oriented_cell_t l_oriented_face_t;
+      typedef typename l_joint_t::oriented_cell_t l_oriented_joint_t;
+      Chain<l_joint_t> global_boundary;
+      std::unordered_set<l_oriented_joint_t> used_joints; // Check unicity of ordered joint
+      // Check the number of groups of joints, to ensure there is only one loop
+      std::unordered_map<l_joint_t,size_type> joint_groups;
+      std::vector<size_type> joint_groups_equ;
+      // First construct all the local (non-oriented) boundaries, and store their orientation on the side
+      // Also accumulate the boundary of the boundary ... to check the boundary of the new cell is closed
+      forall const l_oriented_face_t& oc in cell:
+        {
+          if(!face_fct(oc)) return false;
+          const Chain<l_joint_t>& b1 = boundary(oc);
+          if(b1.empty())
+            {
+              error = NO_SUCH_FACE;
+              return l_cell_t::null;
+            }
+          size_type cur_group = joint_groups_equ.size();
+          joint_groups_equ.push_back(cur_group);
+          forall const l_oriented_joint_t& oj in b1:
+            {
+              if(!used_joints.insert(oj).second) // The element is already there
+                {
+                  error = CELL_BOUNDARY_SELF_INTERSECT;
+                  return l_cell_t::null;
+                }
+              auto found = joint_groups.find(~oj);
+              if(found != joint_groups.end())
+                {
+                  size_type new_group = joint_groups_equ[found->second];
+                  if(new_group > cur_group)
+                    joint_groups_equ[new_group] = cur_group;
+                  else
+                    {
+                      joint_groups_equ[cur_group] = new_group;
+                      cur_group = new_group;
+                    }
+                }
+              else
+                {
+                  joint_groups[~oj] = cur_group;
+                }
+              if(!joint_fct(oc, oj)) return false;
+            }
+          global_boundary |= b1;
+        }
+      if(!global_boundary.empty())
+        {
+          DEBUG_OUT("Boundary of the boundary: " << global_boundary << endl);
+          error = CELL_BOUNDARY_NOT_CLOSED;
+          return l_cell_t::null;
+        }
+      // Now, collapse the joint groups
+      {
+        forall size_type& grp in joint_groups_equ:
+        {
+          grp = joint_groups_equ[grp];
+          if(grp != 0)
+            {
+              error = CELL_BOUNDARY_MULTIPLE_PARTS;
+              return l_cell_t::null;
+            }
+        }
+      }
+      return true;
+    }
+
+    /**
+     * Display all the flips and vertices of this cell complex
+     */
+    void displayFlips() const
+    {
+      out << "Dimension of the Cell Complex: " << N << endl;
+      _displayFlips<N+1>();
+      out << endl;
+    }
+
+    //@}
+
+  protected:
+    ///\name General utility implementation methods
+    //@{
+
+    template <int N1>
+    void _displayFlips(const true_type&) const
+    {
+      get_layer<N1>(*this).displayFlips();
+      _displayFlips<N1-1>();
+    }
+
+    template <int N1>
+    void _displayFlips(const false_type&) const
+    {
+    }
+
+    template <int N1>
+    void _displayFlips() const
+    {
+      _displayFlips<N1>(typename test_type<(N1>=0)>::type());
+    }
+
+    //@}
+    ///\name Edition implementation methods
+    //@{
+
+    /**
+     * Add a cell with oriented neighborhood
+     */
+    template <typename Container>
+    typename Container::value_type::cell_t
+    addCell(const Container& cell, const typename Container::value_type::cell_t& c,
+            const true_type&)
+    {
+      typedef typename Container::value_type cell_flip_t;
+      return addCell(chain(cell), c);
+    }
+
+    /**
+     * Add a cell with non-oriented neighborhood
+     */
+    template <typename Container>
+    typename Container::value_type::cell_t
+    addCell(const Container& cell, const typename Container::value_type::cell_t& c,
+            const false_type&)
+    {
+      typedef typename Container::value_type cell_flip_t;
+      return addCell(cellSet(cell), c);
+    }
+
+    bool addTopFlips_(const cell_t& c,
+                      const oriented_face_t& of,
+                      std::list<top_cell_flip_t>& top_flips)
+    {
+      if(!match(Q,Q,Q,~of).empty())
+      {
+        error = FACE_ALREADY_BETWEEN_CELLS;
+        return false;
+      }
+      forall const cell_t& c1 in cobounds(~of):
+      {
+        top_cell_flip_t fl = this->cellFlip(T, Q, Q, ~of);
+        if(of.orientation() == pos)
+        {
+          fl.face1 = c;
+          fl.face2 = c1;
+        }
+        else
+        {
+          fl.face1 = c1;
+          fl.face2 = c;
+        }
+        top_flips.push_back(fl);
+      }
+      return true;
+    }
+
+    template <typename CellType>
+    bool addTopFlips_(const CellType&,
+                      const typename ncell_t<CellType::N-1>::oriented_cell_t&,
+                      std::list<typename ncell_t<CellType::N+1>::cell_flip_t>&)
+    { return true; }
+
+    void splitEdgeNeighbors(const edge_t& e,
+                            const vertex_t& v,
+                            const edge_t& e1,
+                            const vertex_t& v1,
+                            const edge_t& e2)
+    {
+      typedef typename ncell_t<2>::cell_flip_t l_cell_flip_t;
+      std::set<l_cell_flip_t*> m_neighbors1 = match(Q,e,Q,v1);
+      forall l_cell_flip_t* pf in m_neighbors1:
+      {
+        l_cell_flip_t ct1 = *pf;
+        l_cell_flip_t ct2 = *pf;
+        ct2.joint = v;
+        ct2.face1 = e2;
+        ct2.face2 = e1;
+
+        if(pf->face1 == e)
+          ct1.face1 = e1;
+        else
+          {
+            ct1.face2 = e1;
+            ct2.reverse();
+          }
+
+        removeFlip(pf);
+
+        addFlip(ct1);
+        if(e2)
+          addFlip(ct2);
+      }
+    }
+
+    template <int N1>
+    void splitVolume_(const typename ncell_t<N1>::cell_t& c,
+                      const typename ncell_t<N1>::cell_t& c1,
+                      const typename ncell_t<N1>::cell_t& c2,
+                      const true_type&)
+    {
+      typedef typename ncell_t<N1+2>::cell_flip_t l_cell_flip_t;
+      const std::set<l_cell_flip_t*>& matches = match(Q,Q,Q,c);
+
+      std::list<l_cell_flip_t> to_add;
+      std::list<l_cell_flip_t*> to_remove;
+
+      forall l_cell_flip_t* pf in matches:
+      {
+        l_cell_flip_t cf1 = *pf;
+        l_cell_flip_t cf2 = *pf;
+
+        cf1.joint = c1;
+        cf2.joint = c2;
+
+        to_remove.push_back(pf);
+        to_add.push_back(cf1);
+        to_add.push_back(cf2);
+      }
+
+      forall l_cell_flip_t* pf in to_remove:
+      removeFlip(pf);
+
+      forall const l_cell_flip_t& cf in to_add:
+        addFlip(cf);
+    }
+
+    template <int N1>
+    void splitVolume_(const typename ncell_t<N1>::cell_t& ,
+                      const typename ncell_t<N1>::cell_t& ,
+                      const typename ncell_t<N1>::cell_t& ,
+                      const false_type&)
+    {
+    }
+
+    template <int N1>
+    void splitVolume(const typename ncell_t<N1>::cell_t& c,
+                     const typename ncell_t<N1>::cell_t& c1,
+                     const typename ncell_t<N1>::cell_t& c2)
+    {
+      splitVolume_<N1>(c, c1, c2, typename test_type<(N1<N)>::type());
+    }
+
+    template <int N1>
+    void addMembraneOrientations(const CELL_TYPE(N1,Self)& m,
+                                 const Chain<CELL_TYPE(N1-1,Self)>& mBoundary,
+                                 const CELL_TYPE(N1+1,Self)& cl,
+                                 const CELL_TYPE(N1+1,Self)& cr)
+    {
+      typedef typename ncell_t<N1-1>::oriented_cell_t l_oriented_face_t;
+      forall const l_oriented_face_t& of in mBoundary:
+        {
+          setRelativeOrientation(m, ~of, of.orientation());
+        }
+      setRelativeOrientation(cl, m, pos);
+      setRelativeOrientation(cr, m, neg);
+    }
+
+    template <int N1>
+    void updateRelativeOrientations(const CELL_TYPE(N1,Self)& cell,
+                                    const CELL_TYPE(N1,Self)& cl,
+                                    const CellSet<CELL_TYPE(N1-1,Self)>& cell_l,
+                                    const CELL_TYPE(N1,Self)& cr,
+                                    const CellSet<CELL_TYPE(N1-1,Self)>& cell_r)
+    {
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+
+      forall const l_face_t& f in cell_l:
+        {
+          setRelativeOrientation(cl, f, relativeOrientation(cell, f));
+        }
+
+      forall const l_face_t& f in cell_r:
+        {
+          setRelativeOrientation(cr, f, relativeOrientation(cell, f));
+        }
+
+      updateTopRelativeOrientations(cell, cl, cr);
+    }
+
+    void updateTopRelativeOrientations(const cell_t& /*cell*/,
+                                       const cell_t& /*cl*/,
+                                       const cell_t& /*cr*/)
+    {
+      // Nothing to do here!
+    }
+
+    template <int N1>
+    void updateTopRelativeOrientations(const CELL_TYPE(N1,Self)& cell,
+                                       const CELL_TYPE(N1,Self)& cl,
+                                       const CELL_TYPE(N1,Self)& cr)
+    {
+      typedef typename ncell_t<N1+1>::cell_t l_volume_t;
+      typedef typename ncell_t<N1+1>::oriented_cell_t l_oriented_volume_t;
+      Chain<l_volume_t> cb = coboundary(+cell);
+      forall const l_oriented_volume_t& ov in cb:
+        {
+          setRelativeOrientation(~ov, cl, ov.orientation());
+          setRelativeOrientation(~ov, cr, ov.orientation());
+        }
+    }
+
+
+    void updateSTopFlips(const cell_t& /*c*/,
+                         const cell_t& /*cl*/,
+                         const cell_t& /*cr*/)
+    {
+      // Nothing to do here!
+    }
+
+    template <int N1>
+    void updateSTopFlips(const CELL_TYPE(N1,Self)& c,
+                         const CELL_TYPE(N1,Self)& cl,
+                         const CELL_TYPE(N1,Self)& cr)
+    {
+      typedef typename ncell_t<N1+2>::cell_flip_t l_cojoint_flip_t;
+      std::set<l_cojoint_flip_t*> matches = match(Q,Q,Q,c);
+      forall l_cojoint_flip_t* pf in matches:
+      {
+        l_cojoint_flip_t cf1 = *pf;
+        l_cojoint_flip_t cf2 = *pf;
+        cf1.joint = cl;
+        cf2.joint = cr;
+
+        removeFlip(pf);
+        addFlip(cf1);
+        addFlip(cf2);
+      }
+    }
+
+
+    template <int N1>
+    std::pair<std::set<typename ncell_t<N1-1>::cell_t>, std::set<typename ncell_t<N1-1>::cell_t> >
+    splitBoundary(const std::set<typename ncell_t<N1>::cell_flip_t*>& matches,
+                  const Chain<typename ncell_t<N1-2>::cell_t>& mBoundary) const
+    {
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      typedef typename ncell_t<N1-2>::oriented_cell_t l_oriented_joint_t;
+      typedef typename ncell_t<N1-1>::oriented_cell_t l_oriented_face_t;
+
+      std::pair<std::set<l_face_t>, std::set<l_face_t> > result;
+
+      std::unordered_map<l_face_t,size_type> face_group;
+      face_group.reserve(matches.size());
+      std::vector<size_type> group_eqs;
+      group_eqs.reserve(matches.size());
+
+      forall auto pct in matches:
+        {
+          if(!mBoundary.contains(pct->joint))
+            {
+              const l_face_t& f1 = pct->face1;
+              const l_face_t& f2 = pct->face2;
+              auto found1 = face_group.find(f1);
+              auto found2 = face_group.find(f2);
+              if(found1 == face_group.end() and
+                 found2 == face_group.end())
+                {
+                  size_type gr = group_eqs.size();
+                  face_group[f1] = gr;
+                  face_group[f2] = gr;
+                  group_eqs.push_back(gr);
+                }
+              else if(found1 == face_group.end())
+                face_group[f1] = found2->second;
+              else if(found2 == face_group.end())
+                face_group[f2] = found1->second;
+              else
+                {
+                  size_type& g1 = found1->second;
+                  size_type& g2 = found2->second;
+                  if(g2 < g1)
+                    {
+                      group_eqs[g1] = g2;
+                      g1 = g2;
+                    }
+                  else
+                    {
+                      group_eqs[g2] = g1;
+                      g2 = g1;
+                    }
+                }
+            }
+        }
+
+      // Now, compact the groups
+      size_type g1, g2;
+      bool fg1 = false, fg2 = false;
+      for(size_type i = 0 ; i < group_eqs.size() ; ++i)
+        {
+          size_type cg = group_eqs[group_eqs[i]]; 
+          group_eqs[i] = cg;
+          if(!fg1)
+            {
+              fg1 = true;
+              g1 = cg;
+            }
+          else if(cg != fg1)
+            {
+              if(!fg2)
+                {
+                  fg2 = true;
+                  g2 = cg;
+                }
+              else if(g2 != cg)
+                {
+                  error = STRUCTURE_INVALID;
+                  return result;
+                }
+            }
+        }
+
+      // Find which group correspond to which cell
+      // For that, take an element, and check in which it's correctly oriented
+      l_oriented_joint_t oj = mBoundary.any();
+      const Chain<l_face_t>& faces = coboundary(oj);
+      const l_oriented_face_t& of = faces.any();
+      size_type group = face_group[~of];
+      if((group == g1 and of.orientation() == pos) or
+         (group == g2 and of.orientation() == neg))
+        {
+          std::swap(g1, g2);
+        }
+
+      // Put the faces in the right group
+      forall auto fg in face_group:
+        {
+          if(group_eqs[fg.second] == g1)
+            {
+              result.first.insert(fg.first);
+            }
+          else
+            {
+              result.second.insert(fg.first);
+            }
+        }
+
+      return result;
+    }
+
+    template <int N1>
+    bool _replaceSuperTopFlips(const Chain<CELL_TYPE(N1,Self)>& C1,
+                               const Chain<CELL_TYPE(N1,Self)>& C2,
+                               const true_type&)
+    {
+      // Here, replace the k+2 flips
+      typedef typename ncell_t<N1+2>::cell_flip_t l_cojoint_flip_t;
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1>::oriented_cell_t l_oriented_cell_t;
+      std::set<l_cojoint_flip_t*> to_delete;
+      std::set<l_cojoint_flip_t> to_add;
+
+      {
+        l_cell_t c1 = ~C1.any();
+        forall l_cojoint_flip_t* pf in match(Q, Q, Q, c1):
+          {
+            l_cojoint_flip_t nf(*pf);
+            forall const l_oriented_cell_t& oc in C2:
+              {
+                nf.joint = ~oc;
+                to_add.insert(nf);
+              }
+          }
+        forall const l_oriented_cell_t& oc in C1:
+          {
+            forall l_cojoint_flip_t* pf in match(Q,Q,Q,~oc):
+              to_delete.insert(pf);
+          }
+      }
+
+      forall l_cojoint_flip_t* pf in to_delete:
+      removeFlip(pf);
+
+      forall const l_cojoint_flip_t& nf in to_add:
+        addFlip(nf);
+
+      return true;
+    }
+
+    template <int N1>
+    bool _replaceSuperTopFlips(const Chain<CELL_TYPE(N1,Self)>&,
+                               const Chain<CELL_TYPE(N1,Self)>&,
+                               const false_type&)
+    {
+      // Nothing to do
+      return true;
+    }
+
+    //@}
+
+  public:
+
+    /**
+     * \name Atomic edition operations
+     * These methods should be used with care, as they do not enforce the main invariants of the data structure
+     */
+    //@{
+    /**
+     * Add a flip directly
+     */
+    template <int N1>
+    CELL_FLIP(N1,Self)* addFlip(const CELL_FLIP(N1,Self)& flip)
+    {
+      STATIC_ASSERT(N1>0 and N1 <= N+1, "Flips must be of dimension ranging from 1 to N+1.");
+      typedef typename ncell_t<N1>::cell_flip_t l_cell_flip_t;
+      l_cell_flip_t* pf = new l_cell_flip_t(flip);
+      if(addFlip(pf)) return pf;
+      error = CANNOT_INSERT_FLIP;
+      return 0;
+    }
+
+    /**
+     * Add a flip directly.
+     *
+     * \note The cell complex takes ownership of the pointer
+     */
+    template <int N1>
+    bool addFlip(CELL_FLIP(N1,Self)* flip)
+    {
+      STATIC_ASSERT(N1>0 and N1 <= N+1, "Flips must be of dimension ranging from 1 to N+1.");
+      return get_layer<N1>(*this).addFlip(flip);
+    }
+
+    /**
+     * Remove the orientation between a cell and all its bounds/cobounds
+     */
+    template <int N1>
+    bool removeCellOrientations(const CELL_TYPE(N1,Self)& cell)
+    {
+      typedef typename ncell_t<N1-1>::cell_t face_t;
+      typedef typename ncell_t<N1+1>::cell_t coface_t;
+      const CellSet<face_t>& faces = this->bounds(cell);
+      const CellSet<coface_t>& cofaces = this->cobounds(cell);
+      auto& b1 = get_layer<N1>(*this);
+      auto& b2 = get_layer<N1+1>(*this);
+      bool result = true;
+      forall const face_t& f in faces:
+        result &= b1.removeRelativeOrientation(cell, f);
+      forall const coface_t& f in cofaces:
+        result &= b2.removeRelativeOrientation(f, cell);
+      return result;
+    }
+
+    /**
+     * Set the orientation between a cell and a set of bounds
+     */
+    template <int N1>
+    void setCellOrientations(const CELL_TYPE(N1,Self)& cell,
+                             const Chain<CELL_TYPE(N1-1,Self)>& bounds)
+    {
+      typedef typename ncell_t<N1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1-1>::cell_t l_face_t;
+      typedef typename ncell_t<N1-1>::oriented_cell_t l_oriented_face_t;
+      typedef typename ComplexNthLayer<N1,Self>::type l_layer_t;
+      l_layer_t& layer = get_layer<N1>(*this);
+      forall const l_oriented_face_t& of in bounds:
+        layer.setRelativeOrientation(cell, ~of, of.orientation());
+    }
+
+    /**
+     * Set the orientation between a cell and a face
+     */
+    template <int N1>
+    void setRelativeOrientation(const CELL_TYPE(N1,Self)& cell,
+                                const CELL_TYPE(N1-1,Self)& f,
+                                const RelativeOrientation& ro)
+    {
+      get_layer<N1>(*this).setRelativeOrientation(cell, f, ro);
+    }
+
+    /**
+     * \overload
+     */
+    template <int N1>
+    void setRelativeOrientation(const CELL_TYPE(N1,Self)& cell,
+                                const OrientedObject<CELL_TYPE(N1-1,Self)>& of)
+    {
+      setRelativeOrientation(cell, ~of, of.orientation());
+    }
+
+    /**
+     * Remove the relative orientation between \c cell and \c face
+     */
+    template <int N1>
+    bool removeRelativeOrientation(const CELL_TYPE(N1,Self)& cell,
+                                   const CELL_TYPE(N1-1,Self)& face)
+    {
+      return get_layer<N1>(*this).removeRelativeOrientation(cell, face);
+    }
+
+    /**
+     * Remove a flip
+     */
+    template <int N1>
+    bool removeFlip(const CELL_FLIP(N1,Self)& flip)
+    {
+      STATIC_ASSERT(N1>0 and N1 <= N+1, "Flips must be of dimension ranging from 1 to N+1.");
+      typedef typename ComplexNthLayer<N1,Self>::type l_layer_t;
+      typedef typename l_layer_t::cell_flip_t cell_flip_t;
+      std::set<cell_flip_t*> found = match(flip);
+      if(found.empty())
+        {
+          error = NO_SUCH_FLIP;
+          return false;
+        }
+      else if(found.size() > 1)
+        {
+          error = DUPLICATE_FLIPS;
+          return false;
+        }
+      return get_layer<N1>(*this).removeFlip(*found.begin());
+    }
+
+    /**
+     * Remove (and delete) a flip
+     */
+    template <int N1>
+    bool removeFlip(CELL_FLIP(N1,Self)* flip)
+    {
+      STATIC_ASSERT(N1>0 and N1 <= N+1, "Flips must be of dimension ranging from 1 to N+1.");
+      typedef typename ComplexNthLayer<N1,Self>::type l_layer_t;
+      typedef typename l_layer_t::cell_flip_t cell_flip_t;
+      return get_layer<N1>(*this).removeFlip(flip);
+    }
+    //@}
+    /// Relative orientation of top cells are always true
+    RelativeOrientation relativeOrientation(const typename top_complex_t::cell_t& ,
+                                            const typename main_layer_complex_t::cell_t& ) const
+    {
+      return pos;
+    }
+
+    /// Relative orientation of bottom cells are always true
+    RelativeOrientation relativeOrientation(const vertex_t& ,
+                                            const bottom_t& ) const
+    {
+      return pos;
+    }
+
+    /// Relative orientation between \c c and \c f
+    template <typename CellType>
+    RelativeOrientation relativeOrientation(const CellType& c,
+                                            const typename NTypes<CellType::N-1,Self>::cell_t& f) const
+    {
+      return get_layer<CellType::N>(*this).relativeOrientation(c, f);
+      /*
+       *std::set<cell_flip_t*> m = match(cellFlip(c, f, Q, Q));
+       *if(m.empty())
+       *{
+       *  error = ORIENTATION_OF_UNRELATED_CELLS;
+       *  return invalid;
+       *}
+       *const cell_flip_t& cf = **m.begin();
+       *RelativeOrientation loc = cf.pathOrientation(f);
+       *RelativeOrientation base = relativeOrientation(f, cf.joint);
+       *return loc / base;
+       */
+    }
+
+  protected:
+
+    template <int N1>
+    bool addCellChecks( const Chain<CELL_TYPE(N1,Self)>& cell,
+                        const typename ncell_t<N1+1>::cell_t& c,
+                        std::unordered_map<typename ncell_t<N1-1>::cell_t,typename ncell_t<N1+1>::cell_flip_t>& flips,
+                        std::list<typename ncell_t<N1+2>::cell_flip_t>& top_flips)
+    {
+      typedef typename ncell_t<N1+1>::cell_t l_cell_t;
+      typedef typename ncell_t<N1+1>::oriented_cell_t l_oriented_cell_t;
+      typedef typename ncell_t<N1>::cell_t l_face_t;
+      typedef typename ncell_t<N1>::oriented_cell_t l_oriented_face_t;
+      typedef typename ncell_t<N1-1>::cell_t l_joint_t;
+      typedef typename ncell_t<N1-1>::oriented_cell_t l_oriented_joint_t;
+
+      typedef typename ncell_t<N1+1>::cell_flip_t l_cell_flip_t;
+      typedef typename ncell_t<N1>::cell_flip_t l_face_flip_t;
+      typedef typename ncell_t<N1-1>::cell_flip_t l_joint_flip_t;
+
+      // Data structure to check the connectivity of the surface
+      std::unordered_map<l_face_t,size_type> group_face;
+      std::vector<size_type> group_equiv;
+      group_equiv.reserve(cell.size());
+
+      // For all oriented face
+      forall const l_oriented_face_t& of in cell:
+        {
+          {
+            group_face[~of] = group_equiv.size();
+            group_equiv.push_back(group_equiv.size());
+          }
+          // Then, for all joint
+          forall const l_oriented_joint_t& oj in boundary(of):
+            {
+              auto found = flips.find(~oj);
+              if(found == flips.end())
+                {
+                  // If this is a new joint
+                  if(oj.orientation() == pos)
+                    flips.insert({~oj, cellFlip(c,~of,Q,~oj)});
+                  else
+                    flips.insert({~oj, cellFlip(c,Q,~of,~oj)});
+                }
+              else
+                {
+                  // If we are completing an existing flip
+                  l_cell_flip_t& flip = found->second;
+                  if(oj.orientation() == pos)
+                    {
+                      if(flip.face1)
+                        {
+                          error = WRONG_BOUNDARY_ORIENTATION;
+                          return false;
+                        }
+                      flip.face1 = ~of;
+                    }
+                  else
+                    {
+                      if(flip.face2)
+                        {
+                          error = WRONG_BOUNDARY_ORIENTATION;
+                          return false;
+                        }
+                      flip.face2 = ~of;
+                    }
+                  // The two faces are connected, so store this
+                  size_type g1 = 0, g2 = 0;
+                  auto f1 = group_face.find(flip.face1);
+                  g1 = group_equiv[f1->second];
+                  while(g1 != group_equiv[g1]) g1 = group_equiv[g1];
+                  auto f2 = group_face.find(flip.face2);
+                  g2 = group_equiv[f2->second];
+                  while(g2 != group_equiv[g2]) g2 = group_equiv[g2];
+                  size_type g = std::min(g1, g2);
+#ifdef DEBUG_OUTPUT
+                  out << g1 << "[" << f1->second << "] <=> "
+                      << g2 << "[" << f2->second << "] => "
+                      << (g < g1 ? QString::number(g1) : QString()) << "/"
+                      << (g < g2 ? QString::number(g2) : QString()) << " -> "
+                      << g << endl;
+#endif
+                  if(g < g1)
+                    group_equiv[g1] = g;
+                  if(g < g2)
+                    group_equiv[g2] = g;
+                  f1->second = g;
+                  f2->second = g;
+                }
+            }
+          if(!addTopFlips_(c, of, top_flips))
+            return false;
+        }
+
+      // Compact the groups
+      for(size_type i = 0 ; i < group_equiv.size() ; ++i)
+        {
+          size_type g = group_equiv[group_equiv[i]];
+          if(g > 0)
+            {
+              error = CELL_BOUNDARY_MULTIPLE_PARTS;
+#ifdef DEBUG_OUTPUT
+              out << "groups:";
+              for(int i = 0 ; i < group_equiv.size() ; ++i)
+                out << " " << i << ":" << group_equiv[i];
+              out << endl;
+#endif
+              return false;
+            }
+          group_equiv[i] = g;
+        }
+
+      // Now, check all the flips are complete
+      forall const auto& p in flips:
+        {
+          if(!p.second)
+            {
+              error = CELL_BOUNDARY_NOT_CLOSED;
+              return false;
+            }
+        }
+      return true;
+    }
+
+    template <typename CellFlipType>
+    bool updateFlip(CellFlipType* flip,
+                    const typename CellFlipType::face_t& new_face,
+                    const typename CellFlipType::face_t& old_face = CellFlipType::face_t::exterior)
+    {
+      typedef typename ComplexNthLayer<CellFlipType::N,Self>::type l_layer_t;
+      typedef typename CellFlipType::face_t face_t;
+      l_layer_t& layer = get_layer<CellFlipType::N>(*this);
+      if(!flip->replaceFace(old_face, new_face))
+        return false;
+      layer.face_access[face_t::exterior].erase(flip);
+      layer.face_access[new_face].insert(flip);
+      return true;
+    }
+
+    template <typename CellType, typename CellFlipType>
+    bool refineWithAccess(const CellType& cell,
+                          const std::unordered_map<CellType,std::set<CellFlipType*> >& access,
+                          std::set<CellFlipType*>& flips) const
+    {
+      typedef std::unordered_map<CellType,std::set<CellFlipType*> > _flips_access_t;
+      typename _flips_access_t::const_iterator found = access.find(cell);
+      if(found == access.end())
+        {
+          flips.clear();
+          return false;
+        }
+      if(flips.empty())
+        flips = found->second;
+      else
+        {
+          typedef typename std::set<CellFlipType*>::iterator iterator;
+          typename std::set<CellFlipType*>::const_iterator it_found = found->second.begin();
+          typename std::set<CellFlipType*>::iterator it_flips = flips.begin();
+          while(it_flips != flips.end() and it_found != found->second.end())
+            {
+              if(*it_flips < *it_found)
+                it_flips = flips.erase(it_flips);
+              else if(*it_flips > *it_found)
+                ++it_found;
+              else
+                {
+                  ++it_flips;
+                  ++it_found;
+                }
+            }
+          while(it_flips != flips.end()) it_flips = flips.erase(it_flips);
+          /*
+            std::set<CellFlipType*> new_flips;
+            std::set_intersection(flips.begin(), flips.end(),
+            found->second.begin(), found->second.end(),
+            std::inserter(new_flips, new_flips.end()));
+            std::swap(flips, new_flips);
+          */
+        }
+      return not flips.empty();
+    }
+  };
+
+  template <TEMPLATE_CELL_COMPLEX>
+  const typename CellComplex<CELL_COMPLEX_ARGS>::top_t CellComplex<CELL_COMPLEX_ARGS>::T = CellComplex<CELL_COMPLEX_ARGS>::top_t::exterior;
+
+  template <TEMPLATE_CELL_COMPLEX>
+  const typename CellComplex<CELL_COMPLEX_ARGS>::bottom_t CellComplex<CELL_COMPLEX_ARGS>::_;
+
+#undef CELL_FLIP
+#undef TEMPLATE_CELL_COMPLEX
+#undef CELL_COMPLEX_ARGS
+}
+
+#endif // CELLFLIP_VVH
+

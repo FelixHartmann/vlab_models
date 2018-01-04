@@ -1,0 +1,2893 @@
+// -*- c++ -*-
+#ifndef NOSHADER
+#  include <GL/glew.h>
+#endif
+#include <vve.h>
+
+#include <util/assert.h>
+
+#include <time.h>
+
+#include <queue>
+#include <deque>
+
+#include <cmath>
+using std::isnan;
+
+#include <util/parms.h>
+#include <util/palette.h>
+#include <util/watchdog.h>
+#include <util/random.h>
+
+#include <geometry/geometry.h>
+#include <geometry/quaternion.h>
+#include <geometry/intersection.h>
+#include <geometry/area.h>
+#include <geometry/projection.h>
+#include <geometry/coordinates.h>
+#include <shape/quadric.h>
+#include <iterator>
+
+#include <util/unorderedmap.h>
+
+#include <QMessageBox>
+#include <QStringList>
+#include <QInputDialog>
+#include <QFileDialog>
+#include <QFile>
+//#include "drawer.h"
+#include <QDateTime>
+#include <QAction>
+#include <QCoreApplication>
+#include <QTextStream>
+#include "CSVStream.hpp"
+
+//#include "ply.h"
+//#include "complex.h"
+//#include "pca.h"
+
+#include <debug/unordered_map>
+
+#include <tuple>
+#include <climits>
+
+#ifndef NOSHADER
+#  include "shader.h"
+#endif
+
+#include "structure.h"
+#include "draw.h"
+#include "complex_drawer.h"
+#include "solvergraph_drawer.h"
+
+#include <cellflips/cellflips_edition.h>
+
+extern "C" {
+#include "qhull_a.h"
+}
+
+using namespace cellflips;
+
+typedef std::tuple<size_t,size_t,size_t> triplet;
+
+struct HashTriplet 
+{
+  size_t operator()(const triplet& t) const
+  {
+    return std::get<0>(t) ^ std::get<1>(t) ^ std::get<2>(t);
+  }
+};
+/*
+namespace std {
+
+template <typename T1, typename T2>
+struct hash<std::pair<T1,T2>>
+{
+  static const std::hash<T1> h1;
+  static const std::hash<T2> h2;
+  size_t operator()(const std::pair<T1,T2>& t) const
+  {
+    return h1(t.first) ^ h2(t.second);
+  }
+};
+
+template <typename T1, typename T2>
+const std::hash<T1> hash<std::pair<T1,T2>>::h1;
+
+template <typename T1, typename T2>
+const std::hash<T2> hash<std::pair<T1,T2>>::h2;
+} // namespace std
+*/
+//std::unordered_map<triplet, face, HashTriplet> map;
+
+template <typename T>
+QString toString(const T& t)
+{
+  QString result;
+  QTextStream ts(&result);
+  ts << t;
+  return result;
+}
+
+namespace std
+{
+template <>
+struct hash<std::pair<ccvertex,ccvertex> >
+{
+  size_t operator()(const std::pair<ccvertex,ccvertex>& p) const
+  {
+    static hash<ccvertex> hv;
+    return hv(p.first) ^ hv(p.second);
+  }
+};
+}
+
+using geometry::Point3d;
+//typedef util::Vector<4,double> Point4d;
+typedef util::Vector<5,double> Point5d;
+typedef util::Palette::Color Colorf;
+
+typedef util::Vector<4,float> Point4f;
+typedef util::Vector<3,size_t> Point3u;
+
+struct DescVariables
+{
+  double total_auxin;
+  double max_auxin;
+  double mean_auxin;
+  double max_auxin_apoplast;
+  double max_PIN_cell;
+  double max_PIN_membrane;
+  double min_PIN_membrane;
+  double max_APIN_membrane;
+  double max_AAUX_membrane;
+  double max_PIN_gain;
+  //double P_factor;  // polarisation factor
+  double S_factor;  // stability factor
+  double max_dPIN_membrane;
+  double PIN_L1_toward_L2;
+  size_t nb_cv_cells;
+};
+
+struct MaxdPINVariables
+{
+  int num;
+  double area;
+  double PIN;
+  double dPIN;
+  double APIN;
+  double dAPIN;
+  double AAUX;
+  double dAAUX;
+  double auxin_c;
+  double dauxin_c;
+  double auxin_a;
+  double dauxin_a;
+};
+
+struct ConvergenceCellL1
+{
+  cell cv_cell;
+  Point3d position;
+  double cv_factor;
+  double auxin;
+};
+
+struct PolCell
+{
+  cell pol_cell;
+  int distance;            // distance from cv_cell to pol_cell
+  double pol_factor;       // summative polarisation from cv_cell to pol_cell
+  std::vector<cell> path;  // path from cv_cell to pol_cell
+};
+
+bool compare_PolCells(const PolCell& pc1, const PolCell& pc2)
+{
+  // Camparison based on distances if they are different,
+  // otherwise on polarisation factors.
+  if (pc1.distance != pc2.distance)
+    return pc1.distance > pc2.distance;
+  else {
+    //out << "    Comparison: " << pc1.pol_factor << " <? " << pc2.pol_factor << endl;
+    return pc1.pol_factor < pc2.pol_factor;
+  }
+}
+
+Model PetriModel:
+{
+  util::WatchDog rex;
+  util::Palette palette;
+  Tissue D;   // Delaunay complex
+  Tissue V;   // Voronoi complex
+  const Tissue::bottom_t& _D;
+  const Tissue::top_t& TD;
+  const Tissue::bottom_t& _V;
+  const Tissue::top_t& TV;
+
+  double central_vein_pol;
+  double central_vein_pol_var;
+
+  int colorCell, colorMembrane, colorApoplast, colorLink;
+  float sphereSize, linkThickness;
+  bool plotSolverGraph;
+  SolverGraph S;
+  RDSolver solve;
+
+  QueryType Q;
+
+  QString cellShape;
+  Point3d cellSize;
+  Point3u gridSize;
+  double gridNoise;
+  size_t nb_sinks;
+  double sink_position;
+  double L1_border_size;
+  double central_zone_prop;
+
+  double min_membrane_area;
+  double min_cv_factor;
+  size_t max_cv_cells;
+  double min_pol;
+  double min_central_vein_pol;
+  double min_central_vein_pol_var;
+
+  size_t seed;
+
+  double endTime;
+  
+  double time;
+  double dt, drawDt, drawTime;
+  double stopping_threshold;
+  double maxTime;
+  
+  double apoplast_width;
+
+  double PIN_total; // Total amount of PIN in each L1 cell
+  double PIN_init_corpus; // Initial amount of PIN in each corpus cell
+  double PIN_init; // Initial amount of PIN in the membranes
+  double c_a_0, c_a_0_L1; // Initial concentration of auxin
+  double T_in1, T_in2, T_out1, T_out2;
+  double sigma_a, sigma_a_source, sigma_a_L1, mu_a, mu_a_sink;
+  double d_a, d_PIN;  // auxin and PIN diffusion coefficients
+  double AUX, AUX_L1;
+  double rho_p_0, rho_p_0_L1, rho_p, rho_p_L1, kappa_p, mu_p_star; // PIN production/decay
+  double sigma_p, kappa_p_m, sigma_apin, sigma_aaux, mu_p; // PIN exo/endocytosis
+  double nu_apin_low, nu_apin_high, nu_apin_slope;
+  double a_th;
+
+  double rho_VAF, mu_VAF;
+  double d_VAF;
+  double k_b, k_u;
+  double b_VAF;
+
+  double maxViewPIN, maxViewVAF, maxViewAuxin;
+  int colorPINBegin, colorPINEnd;
+  int colorCellsBegin, colorCellsEnd;
+  int colorL1Begin, colorL1End;
+  int colorSink;
+
+  int fileCount; // Count for the file things
+
+  Point3d pmin, pmax;
+  Point3d initScaling;
+
+  bool showVertices, showEdges, showFaces, showCells, showFaceNormals, showVertexNormals, showBorder;
+  double normalSize;
+
+  //std::unordered_map<ccvertex, CellSet<face> > vertex_faces;
+  std::unordered_map<face, std::vector<ccvertex> > face_shape;
+
+  //ComplexDrawer *drawer;
+
+  //QString debugFile;
+
+  bool stopped = false;
+
+  QPointer<DrawCell<PetriModel>> cellDrawer;
+  QPointer<DrawPIN<PetriModel>> PINDrawer;
+  //QPointer<ComplexDrawer<PetriModel,Tissue>> complexDrawerD;
+  //QPointer<ComplexDrawer<PetriModel,Tissue>> complexDrawerV;
+  //QPointer<DrawSolverGraph<PetriModel>> solverGraphDrawer;
+
+  // structure for desriptive variables
+  DescVariables desc_vars;
+
+  // For writing in a file the variables broadly describing a simulation.
+  /*
+  QString descVariablesFileName;
+  QFile descVariablesOutputFile;
+  CSVStream csvDescVariables;
+
+  // For writing in a file the variables associated to the membrane with
+  // highest PIN derivative..
+  QString maxdPINVariablesFileName;
+  QFile maxdPINVVariablesOutputFile;
+  CSVStream csvMaxdPINVariables;
+  */
+
+  void stop()
+  {
+    stopped = true;
+    Model::stop();
+  }
+
+  void readInitParms()
+  {
+    util::Parms parms("view.v");
+    // read the parameters here
+    parms("Main", "Seed", seed);
+    parms("Main", "CellShape", cellShape);
+    parms("Main", "CellSize", cellSize);
+    parms("Main", "GridSize", gridSize);
+    parms("Main", "GridNoise", gridNoise);
+    parms("Main", "NbSinks", nb_sinks);
+    parms("Main", "SinkPosition", sink_position);
+    parms("Main", "L1BorderSize", L1_border_size);
+    parms("Main", "CentralZoneProportion", central_zone_prop);
+    parms("Main", "MinMembraneArea", min_membrane_area);
+    parms("Main", "ApoplastWidth", apoplast_width);
+    parms("Main", "StoppingThreshold", stopping_threshold);
+    parms("Main", "DrawDt", drawDt);
+    parms("Main", "MaxTime", maxTime);
+    parms("Main", "MinCvFactor", min_cv_factor);
+    parms("Main", "MaxNbCvCells", max_cv_cells);
+    parms("Main", "MinCellCellPolarisation", min_pol);
+    parms("Main", "MinVeinPolarisation", min_central_vein_pol);
+    parms("Main", "MinVeinPolarisationVariation", min_central_vein_pol_var);
+
+    parms("CellChemicals", "ApoplastAuxinDiffusion", d_a);
+    parms("CellChemicals", "MembranePINDiffusion", d_PIN);
+    parms("CellChemicals", "InitialAuxinConcentration", c_a_0);
+    parms("CellChemicals", "AUXLAXConcentration", AUX);
+    parms("CellChemicals", "PINTotalConcentration", PIN_total);
+    parms("CellChemicals", "InitialPINCorpus", PIN_init_corpus);
+    parms("CellChemicals", "InitialMembranePINConcentration", PIN_init);
+    parms("CellChemicals", "PINBaseProduction", rho_p_0);
+    parms("CellChemicals", "AuxinDepPINProduction", rho_p);
+    parms("CellChemicals", "PINProductionSaturation", kappa_p);
+    parms("CellChemicals", "PINTurnover", mu_p_star);
+    parms("CellChemicals", "AAUXFormation", T_in1);
+    parms("CellChemicals", "APINFormation", T_out1);
+    parms("CellChemicals", "InfluxByAAUX", T_in2);
+    parms("CellChemicals", "EffluxByAPIN", T_out2);
+    parms("CellChemicals", "AuxinProduction", sigma_a);
+    parms("CellChemicals", "AuxinTurnover", mu_a);
+    parms("CellChemicals", "PINExocytosisConstitutive", sigma_p);
+    parms("CellChemicals", "PINExocytosisAPIN", sigma_apin);
+    parms("CellChemicals", "PINExocytosisAAUX", sigma_aaux);
+    parms("CellChemicals", "PINMembraneSaturation", kappa_p_m);
+    parms("CellChemicals", "PINEndocytosisConstitutive", mu_p);
+    parms("CellChemicals", "APINBreakupLow", nu_apin_low);
+    parms("CellChemicals", "APINBreakupHigh", nu_apin_high);
+    parms("CellChemicals", "APINBreakupSlope", nu_apin_slope);
+    parms("CellChemicals", "AuxinThreshold", a_th);
+    parms("CellChemicals", "VAFTurnover", mu_VAF);
+    parms("CellChemicals", "VAFDiffusion", d_VAF);
+    parms("CellChemicals", "VAFBinding", k_b);
+    parms("CellChemicals", "VAFUnbinding", k_u);
+    parms("CellChemicals", "ExpBasePINRelocation", b_VAF);
+
+    parms("ChemicalsSource", "AuxinProductionSource", sigma_a_source);
+
+    parms("ChemicalsL1", "AuxinProductionL1", sigma_a_L1);
+    parms("ChemicalsL1", "PINBaseProductionL1", rho_p_0_L1);
+    parms("ChemicalsL1", "AuxinDepPINProductionL1", rho_p_L1);
+    parms("ChemicalsL1", "AUXLAXConcentrationL1", AUX_L1);
+    parms("ChemicalsL1", "InitialAuxinConcentrationL1", c_a_0_L1);
+
+    parms("ChemicalsSink", "AuxinTurnoverSink", mu_a_sink);
+    parms("ChemicalsSink", "VAFSurfaceProduction", rho_VAF);
+
+    /*
+    parms("Output", "DescVariablesFile", descVariablesFileName);
+    parms("Output", "MaxdPINVariablesFile", maxdPINVariablesFileName);
+    */
+
+    solve.readParms(parms, "Solver");
+  }
+
+  // Method to (re)read the view file
+  void reread()
+  {
+    util::Parms parms("view.v");
+
+    parms("Main", "Seed", seed);
+    parms("Main", "CellSize", cellSize);
+    parms("Main", "GridSize", gridSize);
+    parms("Main", "GridNoise", gridNoise);
+    parms("Main", "L1BorderSize", L1_border_size);
+    parms("Main", "CentralZoneProportion", central_zone_prop);
+    parms("Main", "DrawDt", drawDt);
+
+    parms("Main", "InitScaling", initScaling);
+
+    parms("View", "ShowVertices", showVertices);
+    parms("View", "ShowEdges", showEdges);
+    parms("View", "ShowFaces", showFaces);
+    parms("View", "ShowCells", showCells);
+    parms("View", "ShowBorder", showBorder);
+    parms("View", "ShowFaceNormals", showFaceNormals);
+    parms("View", "ShowVertexNormals", showVertexNormals);
+    parms("View", "NormalSize", normalSize);
+
+    parms("View", "ColorCorpusBegin", colorCellsBegin);
+    parms("View", "ColorL1Begin", colorL1Begin);
+    parms("View", "ColorCorpusEnd", colorCellsEnd);
+    parms("View", "ColorL1End", colorL1End);
+    parms("View", "SinkColor", colorSink);
+
+    parms("View", "ColorPINBegin", colorPINBegin);
+    parms("View", "ColorPINEnd", colorPINEnd);
+
+    parms("View", "MaxViewAuxin", maxViewAuxin);
+    parms("View", "MaxViewPIN", maxViewPIN);
+    parms("View", "MaxViewVAF", maxViewVAF);
+
+    parms("SolverGraphDrawer", "PlotSolverGraph", plotSolverGraph);
+    parms("SolverGraphDrawer", "ColorCell", colorCell);
+    parms("SolverGraphDrawer", "ColorMembrane", colorMembrane);
+    parms("SolverGraphDrawer", "ColorApoplast", colorApoplast);
+    parms("SolverGraphDrawer", "ColorLink", colorLink);
+    parms("SolverGraphDrawer", "LinkThickness", linkThickness);
+    parms("SolverGraphDrawer", "SphereSize", sphereSize);
+
+    PINDrawer->updateColors();
+    cellDrawer->updateColors();
+    //complexDrawerD->updateColors();
+    //complexDrawerV->updateColors();
+  }
+
+  // When files are modified, just ask the watch dog to warn the various 
+  // registered objects
+  void modifiedFiles( const std::set<std::string>& filenames )
+  {
+    rex.watch(filenames);
+  }
+
+  init
+    : rex(this)
+    , palette("pal.map")
+    , _D(D._)
+    , TD(D.T)
+    , _V(V._)
+    , TV(V.T)
+    //, drawer(0)
+    , central_vein_pol(0)
+    , time(0)
+    , drawTime(0)
+    , cellDrawer(new DrawCell<PetriModel>(this, V))
+    , PINDrawer(new DrawPIN<PetriModel>(this, V))
+    //, complexDrawerD(new ComplexDrawer<PetriModel,Tissue>(this, D, palette))
+    //, complexDrawerV(new ComplexDrawer<PetriModel,Tissue>(this, V, palette))
+    //, solverGraphDrawer(new DrawSolverGraph<PetriModel>(this, V, S, palette))
+    {
+      // First read of the parameters
+      readInitParms();
+      reread();
+      // Set the configuration file name of the model to be view.v
+      setFilename("view.v");
+      // Register the model and the palette to the watch dog
+      rex.addObject(this);
+      rex.addObject(palette);
+
+      rex.addObject(cellDrawer);
+      rex.addObject(PINDrawer);
+      //rex.addObject(complexDrawerD);
+      //rex.addObject(complexDrawerV);
+      //rex.addObject(solverGraphDrawer);
+
+      addDrawable(cellDrawer);
+      addDrawable(PINDrawer);
+      //addDrawable(complexDrawerD);
+      //addDrawable(complexDrawerV);
+      //addDrawable(solverGraphDrawer);
+
+      //addMenuItem("Select n-cell", SLOT(selectCell()));
+
+      fileCount = 1;
+      QStringList args = arguments();
+      if(args.size() > 0)
+      {
+        bool ok;
+        fileCount = args[0].toUInt(&ok);
+        if(!ok)
+          fileCount = 1;
+      }
+
+      if(seed == 0)
+        seed = util::sran_time();
+      else
+        util::sran(seed);
+
+      out << "Seed = " << seed << endl;
+
+      //addMenuItem("Flush CSV", this, SLOT(flushCSV()));
+
+      //std::vector<Point3d> pts = placePointsOnTwoOpposedTetrahedra();
+
+      if (cellShape == "cube") {
+        if (!makeCubicComplex(gridSize))
+          vvassert_msg(false, "Creation of cubic complex failed");
+      }
+      else {
+        std::vector<Point3d> pts, anchors;
+        std::vector<CellType> cell_types;
+
+        //placePointsOnNoisyCubeWithInnerPoint(pts, anchors);
+        //placePointsOnTetrahedronWithInnerPoint(pts, anchors);
+        //placePointsOnNoisyCubicGrid(gridSize, pts, anchors, cell_types);
+        //placePointsOnNoisyTruncatedOctahedra(gridSize, pts, anchors, cell_types);
+        //placePointsOnNoisyTruncatedOctahedraModified(gridSize, pts, anchors, cell_types);
+        placePointsOnNoisyTruncatedOctahedraInCylinder(gridSize.x(), gridSize.z(), pts, anchors, cell_types);
+        //std::vector<Point3d> pts = placeRandomPointsInUnitCube(7);
+
+        if(!makeDelaunayComplex(pts, anchors, cell_types))
+          vvassert_msg(false, "Creation of Delaunay complex failed");
+
+        updateGeometry(D);
+
+        /*
+        forall const edge& e in D.edges():
+          updateEdgeStatus(e);
+        */
+
+        setStatus();
+
+        if(!makeVoronoiComplex())
+          vvassert_msg(false, "Creation of Voronoi complex failed");
+      }
+
+      // Scale the point
+      forall const ccvertex& v in V.vertices():
+        v->pos = multiply(v->pos, initScaling);
+
+      initConcentrations();
+
+      cellDrawer->updateGeometry();
+      PINDrawer->updateGeometry();
+      //complexDrawerD->updateGeometry();
+      //complexDrawerV->updateGeometry();
+
+      createSolverGraph(V);
+      //solverGraphDrawer->updateGeometry();
+
+      /*
+      descVariablesOutputFile.setFileName(descVariablesFileName);
+      if(not descVariablesOutputFile.open(QIODevice::WriteOnly))
+        vvassert_msg(false, "Opening of descVariablesOutputFile failed.");
+      csvDescVariables.setDevice(&descVariablesOutputFile);
+
+      auto header_desc = (QStringList()
+        << "time"
+        << "dt"
+        << "total_auxin"
+        << "max_auxin_conc_in_cells"
+        << "max_auxin_conc_in_apoplasts"
+        << "max_PIN_conc_in_cells"
+        << "min_PIN_conc_in_membranes"
+        << "max_PIN_conc_in_membranes"
+        << "max_APIN_conc_in_membranes"
+        << "max_AAUX_conc_in_membranes"
+        << "max_PIN_loss_gain"
+        << "max_dauxin"
+        << "max_dPIN"
+        );
+      csvDescVariables << header_desc;
+
+      maxdPINVVariablesOutputFile.setFileName(maxdPINVariablesFileName);
+      if(not maxdPINVVariablesOutputFile.open(QIODevice::WriteOnly))
+        vvassert_msg(false, "Opening of maxdPINVVariablesOutputFile failed.");
+      csvMaxdPINVariables.setDevice(&maxdPINVVariablesOutputFile);
+
+      auto header_max_dPIN = (QStringList()
+        << "time"
+        << "dt"
+        << "face_num"
+        << "area"
+        << "PIN"
+        << "dPIN"
+        << "APIN"
+        << "dAPIN"
+        << "AAUX"
+        << "dAAUX"
+        << "auxin_c"
+        << "dauxin_c"
+        << "auxin_a"
+        << "dauxin_a"
+        );
+      csvMaxdPINVariables << header_max_dPIN;
+      */
+
+      //solver_graph_summary();
+    }
+
+  void solver_graph_summary()
+  {
+    int nb_cells = 0;
+    int nb_membranes = 0;
+    int nb_apoplasts = 0;
+    int nb_nlinks = 0;
+    for (const node n: S)
+    {
+      switch(n->type) {
+        case NT_CELL:
+          out << "Cell volume: " << n->size << endl;
+          nb_cells++;
+          break;
+        case NT_MEMBRANE:
+          out << "Membrane area: " << n->size << endl;
+          nb_membranes++;
+          break;
+        case NT_APOPLAST:
+          {
+            out << "Apoplast volume: " << n->size << endl;
+            nb_apoplasts++;
+            for (const node nn: S.neighbors(n))
+            {
+              if (n < nn) {
+                switch(nn->type) {
+                  case NT_APOPLAST:
+                    {
+                      nlink nl = S.edge(n, nn);
+                      out << "Apoplast-apoplast area: " << nl->area << endl;
+                      nb_nlinks++;
+                      break;
+                    } 
+                }
+              }
+            }
+          break;
+          }
+      }
+    }
+    out << "# cells: " << nb_cells << endl;
+    out << "# membranes: " << nb_membranes << endl;
+    out << "# apoplasts: " << nb_apoplasts << endl;
+    out << "# apoplast-apoplast surfaces: " << nb_nlinks << endl;
+  }
+
+  void initConcentrations()
+  {
+    // PIN, APIN, AAUX and cell auxin concentration
+    for (const cell c: V.cells()) {
+      if (c->type == L1)
+        c->auxin = c_a_0_L1;
+      else
+        c->auxin = c_a_0;
+      double cell_PIN = 0;
+      /*
+      if (c->type == L1) {
+        //double cell_PIN = PIN_total * c->volume;
+        cell_PIN = PIN_total * c->area/6;
+      }
+      else if (c->type == CORPUS) {
+        cell_PIN = PIN_init_corpus * c->area/6;
+      }
+      */
+      if (c->type == CORPUS or c->type == L1) {
+        cell_PIN = PIN_init_corpus * c->area/6;
+      }
+      for (const oriented_face& of: V.boundary(+c)) {
+        // make sure there is a cell on the other side
+        if (V.flip(V.T, c, ~of) and of->area > min_membrane_area) { 
+          switch(of.orientation()) {
+            case cellflips::pos:
+              {
+                if (cell_PIN > 0)
+                  of->PINpos = PIN_init;
+                else
+                  of->PINpos = 0;
+                of->APINpos = 0;
+                of->AAUXpos = 0;
+                break;
+              }
+            case cellflips::neg:
+              {
+                if (cell_PIN > 0)
+                  of->PINneg = PIN_init;
+                else
+                  of->PINneg = 0;
+                of->APINneg = 0;
+                of->AAUXneg = 0;
+                break;
+              }
+            default:
+              break;
+          }
+          cell_PIN -= of->area * PIN_init;
+        }
+      }
+      c->PIN = cell_PIN / c->volume;
+    }
+
+    // apoplast auxin concentration
+    for(const face f: V.faces()) {
+      f->auxin = c_a_0;
+    }
+
+  }
+
+finalize:
+  {
+  }
+
+  void step()
+  {
+    do {
+      solve(S, *this);
+      forall const node& n in S:
+        n->apply();
+      dt = solve.dt;
+      time += dt;
+      drawTime += dt;
+    } while (drawTime < drawDt);
+    drawTime -= drawDt;
+    cellDrawer->updateColors();
+    PINDrawer->updateColors();
+    //complexDrawerD->updateColors();
+    //complexDrawerV->updateColors();
+
+    std::vector<ConvergenceCellL1> cv_cells_L1 = search_convergence_cells(V);
+
+    desc_vars = computeDescVariables(V, cv_cells_L1);
+
+    out << "Time: " << time << " - dt = " << dt << endl;
+    /*
+    out << "Total auxin: " << desc_vars.total_auxin << endl;
+    out << "Max auxin concentration in cells: " << desc_vars.max_auxin << endl;
+    out << "Max auxin concentration in apoplasts: " << desc_vars.max_auxin_apoplast << endl;
+    out << "Max PIN concentration in cells: " << desc_vars.max_PIN_cell << endl;
+    out << "PIN concentration in membranes: " << desc_vars.min_PIN_membrane << " / " << desc_vars.max_PIN_membrane << endl;
+    out << "Max APIN concentration in membranes: " << desc_vars.max_APIN_membrane << endl;
+    out << "Max AAUX concentration in membranes: " << desc_vars.max_AAUX_membrane << endl;
+    out << "Max PIN loss/gain: " << desc_vars.max_PIN_gain << endl;
+    //out << "Polarisation factor: " << desc_vars.P_factor << endl;
+    out << "Stability factor: " << desc_vars.S_factor << endl;
+    out << "Max dPIN: " << desc_vars.max_dPIN_membrane << endl;
+    //out << "Area of membrane with max dPIN: " << max_dPIN_vars.area << endl;
+    out << "" << endl;
+    out << "[Results]" << endl;
+    */
+
+    out << "MeanAuxin = " << desc_vars.mean_auxin << endl;
+    
+    out << "PIN towards L2 = " << desc_vars.PIN_L1_toward_L2 << endl;
+
+    out << "Stability = " << desc_vars.max_dPIN_membrane << endl;
+
+    out << "NbCvCells = " << desc_vars.nb_cv_cells << endl;
+
+    /*
+    size_t cv_cell_idx = 0;
+    for (const ConvergenceCellL1& cv_cell: cv_cells_L1)
+    {
+      Point3d pos = cv_cell.position;
+      double x = pos.x();
+      double y = pos.y();
+      size_t R = gridSize.x();
+      double r = std::sqrt(x*x + y*y);
+      double cv_factor = cv_cell.cv_factor;
+      double normalised_auxin = cv_cell.auxin / desc_vars.mean_auxin;
+      //if (nb_cv_cells < max_cv_cells
+      if (cv_factor > min_cv_factor and normalised_auxin > 1 and r < (R - 1.)) {
+        cv_cell_idx++;
+        // Cell n = x y normalised_auxin_conc cv_factor
+        out << "Cell" << cv_cell_idx << " = " << x << " " << y << " " 
+          << normalised_auxin << " " << cv_factor << endl;
+      }
+    }
+    */
+
+    int nb_cv_cells = cv_cells_L1.size();
+    switch(nb_cv_cells) {
+      case 0:
+        out << "No convergence cell." << endl;
+        break;
+      case 1:
+        out << "1 convergence cell." << endl;
+        out << "Position in L1 - Auxin - Convergence" << endl;
+        break;
+      default:
+        out << nb_cv_cells << " convergence cells." << endl;
+        out << "Position in L1 - Auxin - Convergence" << endl;
+        break;
+    }
+    for (const ConvergenceCellL1& cv_cell: cv_cells_L1)
+    {
+      Point3d pos = cv_cell.position;
+      double x = pos.x();
+      double y = pos.y();
+      size_t R = gridSize.x();
+      double r = std::sqrt(x*x + y*y);
+
+      if (cv_cell.cv_factor > min_cv_factor and r < (R - 1.))
+      {
+        out << "(" << pos.x() << ", " << pos.y() << ")";
+        out << " - " << cv_cell.auxin << " - " << cv_cell.cv_factor << endl;
+        if (gridSize.z() > 3) {
+          PolCell sink_pol_cell = search_most_polarised_path(V, cv_cell.cv_cell);
+          if (sink_pol_cell.distance < 1)
+            out << "  No polarised path to the sink." << endl;
+          else {
+            double pol_factor = sink_pol_cell.pol_factor;
+            out << "  Polarisation factor: " << pol_factor << endl;
+            if ((pos.x() == 4.5) and (pos.y() == 4.5)) {
+              central_vein_pol_var = std::abs(pol_factor - central_vein_pol) / drawDt;
+              central_vein_pol = pol_factor;
+              out << "  Polarisation variation: " << central_vein_pol_var << endl;
+            }
+            out << "  Distance: " << sink_pol_cell.distance << endl;
+            out << "  Path:" << endl;
+          }
+          for (const cell& c: sink_pol_cell.path)
+          {
+            Point3d pos = c->pos;
+            out << "    (" << pos.x() << ", " << pos.y() << ", " << pos.z() << ")";
+            out << endl;
+          }
+        }
+      }
+    }
+    out << "" << endl;
+
+    if (0 > 1) {
+      out << "Stopping criterion reached." << endl;
+      out << "" << endl;
+    }
+  }
+
+  bool placePointsOnNoisyTruncatedOctahedra(
+      const Point3u& gridSize,
+      std::vector<Point3d>& pts,     
+      std::vector<Point3d>& anchors,
+      std::vector<CellType>& cell_types)
+  {
+    size_t X = gridSize.x() + 1, Y = gridSize.y() + 1, Z = gridSize.z() + 1;
+    //if (Z % 2 == 1)
+    //  Z++;
+    size_t nbAnchors = 2 * (X + 1) * (Y + 1) + 2 * (Z - 1) * (X + Y);
+    size_t nbPoints = (X + 1) * (Y + 1) * (Z + 1) - nbAnchors;
+    pts.resize(nbPoints);
+    anchors.resize(nbAnchors);
+    cell_types.resize(nbPoints);
+
+    // Create points
+    size_t anchor_idx = 0;
+    size_t pts_idx = 0;
+    for(size_t i = 0 ; i <= X ; ++i)
+      for(size_t j = 0 ; j <= Y ; ++j)
+        for(size_t k = 0 ; k <= Z ; ++k) {
+          Point3d pos;
+          if (k % 2 == 0)
+            pos = util::gaussRan(Point3d(i, j, k), Point3d(.1, .1, .1));
+          else
+            pos = util::gaussRan(Point3d(i + 0.5, j + 0.5, k), Point3d(.1, .1, .1));
+          pos = multiply(pos, cellSize);
+          if (i == 0 or i == X or j == 0 or j == Y or k == 0 or k == Z) {  // anchor
+            anchors[anchor_idx] = pos;
+            anchor_idx++;
+          }
+          else {
+            pts[pts_idx] = pos;
+            //if (k == Z-1 and j == Y-1 and i == X/2)
+            //  cell_types[pts_idx] = SOURCE;
+            // central sink
+            if (k == 1 and j == Y/2 and i == X/2)
+              cell_types[pts_idx] = SINK;
+            // four corner sinks
+            else if (k == 1 and ((j-1) % (Y-2) == 0) and ((i-1) % (X-2) == 0))
+              cell_types[pts_idx] = SINK;
+            // four mid-edge sinks
+            else if (k == 1 and ((i-1) % (X-2) == 0) and (j == Y/2))
+              cell_types[pts_idx] = SINK;
+            else if (k == 1 and ((j-1) % (Y-2) == 0) and (i == X/2))
+              cell_types[pts_idx] = SINK;
+            // L1 cells
+            else if (k == Z-1)
+              cell_types[pts_idx] = L1;
+            pts_idx++;
+          }
+        }
+
+    return true;
+  }
+
+  bool placePointsOnNoisyTruncatedOctahedraInCylinder(
+      size_t radius,
+      size_t height,
+      std::vector<Point3d>& pts,     
+      std::vector<Point3d>& anchors,
+      std::vector<CellType>& cell_types)
+  {
+    size_t D = 2*radius + 3;
+    size_t H = height + 1;
+    size_t nbAnchors = 0;
+    size_t nbPoints = 0;
+    std::list<Point3d> all_points;
+    std::unordered_map<size_t, bool> is_anchor_map;
+    std::unordered_map<size_t, CellType> cell_type_map;
+    size_t counter = 0;
+    for (size_t i = 0 ; i < D ; ++i) {
+      int X = i - radius - 1;
+      //out << "Loop level 1: " << i << endl;
+      for (size_t j = 0 ; j < D ; ++j) {
+        int Y = j - radius - 1;
+        //out << "  Loop level 2: " << j << endl;
+        for (size_t k = 0 ; k <= H ; ++k) {
+          //out << "    Loop level 3: " << k << endl;
+          Point3d pos;
+          if (k % 2 == 0)
+            //pos = util::gaussRan(Point3d(X, Y, k), Point3d(.1, .1, .1));
+            pos = util::gaussRan(Point3d(X, Y, k),
+                                 Point3d(gridNoise, gridNoise, gridNoise));
+          else
+            //pos = util::gaussRan(Point3d(X + 0.5, Y + 0.5, k), Point3d(.1, .1, .1));
+            pos = util::gaussRan(Point3d(X + 0.5, Y + 0.5, k),
+                                 Point3d(gridNoise, gridNoise, gridNoise));
+          pos = multiply(pos, cellSize);
+          all_points.push_back(pos);
+          if (k == 0 or k == H or ((X*X + Y*Y) > (radius*radius + cellSize.x()))) {
+            //out << "      Anchor at " << X << ", " << Y <<  ", " << k << "." << endl;
+            nbAnchors++;
+            is_anchor_map[counter] = true;
+          }
+          // Starting from L3, inner layers have a smaller diameter.
+          else if (H > 3 and k < H-2
+                   and (X*X + Y*Y) >= (pow(radius, 2) - pow(L1_border_size*cellSize.x(), 2))) {
+            //out << "      Anchor at " << X << ", " << Y <<  ", " << k << "." << endl;
+            nbAnchors++;
+            is_anchor_map[counter] = true;
+          }
+          else {
+            //out << "=> Point at " << X << ", " << Y <<  ", " << k << "." << endl;
+            is_anchor_map[counter] = false;
+            /* 1 sink in the center and 8 sinks in the periphery.
+            if (k == 1 and (X == 0 and Y == 0
+                            or (std::abs(X) == radius and Y == 0)
+                            or (std::abs(Y) == radius and X == 0)
+                            or (std::abs(X) > std::ceil(radius/2.)
+                                and std::abs(Y) > std::ceil(radius/2.))))
+            */
+            // Sinks are evenly-spaced along a cicle.
+            if (H > 3 and k == 1) {
+              int sink_radius = ceil(sink_position * radius);
+              if (nb_sinks == 1)
+                sink_radius = 0;  // sink in the center
+              for (size_t n = 0 ; n < nb_sinks ; ++n) {
+                //double theta = (n + 0.5)*2*M_PI/nb_sinks;
+                double theta = n*2*M_PI/nb_sinks;
+                int X_sink = int(sink_radius * cos(theta));
+                int Y_sink = int(sink_radius * sin(theta));
+                if (X == X_sink and Y == Y_sink)
+                  cell_type_map[nbPoints] = SINK;
+              }
+            }
+            /*
+            int halfrad = ceil((radius)/2.);
+            int quarterrad = ceil((radius)/4.);
+            int halfradproj = ceil(radius * sqrt(3)/4);
+            if (H > 4 and k == 1 and (abs(X) == halfrad and Y == 0
+                            or abs(X) == quarterrad and abs(Y) == halfradproj))
+              cell_type_map[nbPoints] = SINK;
+            */
+            // L1 cells
+            if (k == H-1) {
+              // border L1 cells are no strong auxin producer
+              if ((X*X + Y*Y) >= (pow(radius, 2) - pow(L1_border_size*cellSize.x(), 2))) {
+                cell_type_map[nbPoints] = CORPUS;
+              }
+              // central L1 cells are no strong auxin producer
+              else if ((X*X + Y*Y) < pow(central_zone_prop*radius, 2)) {
+                cell_type_map[nbPoints] = CORPUS;
+              }
+              // other L1 cells are no strong auxin producer
+              else
+                cell_type_map[nbPoints] = L1;
+            }
+            nbPoints++;
+          }
+          counter++;
+        }
+      }
+    }
+
+    pts.resize(nbPoints);
+    anchors.resize(nbAnchors);
+    cell_types.resize(nbPoints);
+
+    size_t pts_cnt = 0;
+    size_t anchors_cnt = 0;
+    //for (size_t i = 0 ; i < counter ; ++i) {
+    for (const Point3d p : all_points) {
+      bool is_anchor = true;
+      try {
+        is_anchor = is_anchor_map.at(pts_cnt + anchors_cnt);
+      } catch(std::out_of_range e) {
+        out << "Error, point not in is_anchor_map." << endl;
+      }
+      if (is_anchor) {
+        anchors[anchors_cnt] = p;
+        anchors_cnt++;
+      }
+      else {
+        CellType cell_type = CORPUS;
+        try {
+          cell_type = cell_type_map.at(pts_cnt);
+        } catch(std::out_of_range e) {
+          //out << "Error, point not in cell_type_map." << endl;
+        }
+        pts[pts_cnt] = p;
+        if (cell_type == L1) {
+          cell_types[pts_cnt] = L1;
+        }
+        else if (cell_type == SINK) {
+          cell_types[pts_cnt] = SINK;
+        }
+        pts_cnt++;
+      }
+    }
+
+    return true;
+  }
+
+  /*
+   * Making the 3D grid
+   *
+   * Orientations in 2D are:
+   *
+   *  Y/Z
+   *   ^
+   *   |
+   *
+   *   *----->*
+   *   ^      ^
+   *   |  --  |
+   *   | |  | |
+   *   |  ->  |
+   *   |      |
+   *   *----->*  --> X/Y
+   *
+   * For any two axis: (X,Y), (Y,Z) or (X,Z)
+   *
+   */
+  bool makeCubicComplex(const Point3u& gridSize)
+  {
+    V.clear();
+
+    auto X = gridSize.x(), Y = gridSize.y(), Z = gridSize.z();
+    // Prepare vertices
+    auto nbVertices = (X+1)*(Y+1)*(Z+1);
+    std::vector<ccvertex> vertices(nbVertices, ccvertex::null);
+
+    auto vertexOffset = [X,Y,Z](size_t i, size_t j, size_t k) {
+      return i*(Y+1)*(Z+1) + j*(Z+1) + k;
+    };
+
+    // Prepare edges
+    auto nbEdgesX = X*(Y+1)*(Z+1);
+    auto nbEdgesY = (X+1)*Y*(Z+1);
+    auto nbEdgesZ = (X+1)*(Y+1)*Z;
+    std::vector<edge> edgeX(nbEdgesX, edge::null);
+    std::vector<edge> edgeY(nbEdgesY, edge::null);
+    std::vector<edge> edgeZ(nbEdgesZ, edge::null);
+
+    auto edgeXOffset = [X,Y,Z](size_t i, size_t j, size_t k) {
+      return i*(Y+1)*(Z+1) + j*(Z+1) + k;
+    };
+    auto edgeYOffset = [X,Y,Z](size_t i, size_t j, size_t k) {
+      return i*Y*(Z+1) + j*(Z+1) + k;
+    };
+    auto edgeZOffset = [X,Y,Z](size_t i, size_t j, size_t k) {
+      return i*(Y+1)*Z + j*Z + k;
+    };
+
+    // Prepage faces
+    auto nbFacesX = (X+1)*Y*Z;
+    auto nbFacesY = X*(Y+1)*Z;
+    auto nbFacesZ = X*Y*(Z+1);
+
+    auto faceXOffset = [X,Y,Z](size_t i, size_t j, size_t k) {
+      return i*Y*Z + j*Z + k;
+    };
+    auto faceYOffset = [X,Y,Z](size_t i, size_t j, size_t k) {
+      return i*(Y+1)*Z + j*Z + k;
+    };
+    auto faceZOffset = [X,Y,Z](size_t i, size_t j, size_t k) {
+      return i*Y*(Z+1) + j*(Z+1) + k;
+    };
+
+    std::vector<face> faceX(nbFacesX, face::null);
+    std::vector<face> faceY(nbFacesY, face::null);
+    std::vector<face> faceZ(nbFacesZ, face::null);
+
+    // First, place vertices
+    for(size_t i = 0 ; i <= X ; ++i)
+      for(size_t j = 0 ; j <= Y ; ++j)
+        for(size_t k = 0 ; k <= Z ; ++k) {
+          ccvertex v = V.addVertex();
+          v->pos = multiply(Point3d(i, j, k), cellSize);
+          vertices[vertexOffset(i, j, k)] = v;
+        }
+
+    // Then, edges
+    for(size_t i = 0 ; i <= X ; ++i)
+      for(size_t j = 0 ; j <= Y ; ++j)
+        for(size_t k = 0 ; k <= Z ; ++k) {
+          ccvertex c0 = vertices[vertexOffset(i, j, k)];
+          // X edge
+          if(i < X) {
+            ccvertex cx = vertices[vertexOffset(i+1, j, k)];
+            edge e = addCell(V, {+cx, -c0});
+            if(not e)
+              out << "Failed to add X edge from corner " << i << " " << j << " " << k << endl;
+            else {
+              edgeX[edgeXOffset(i, j, k)] = e;
+              updateEdgeGeometry(V, e);
+            }
+          }
+          if(j < Y) {
+            ccvertex cy = vertices[vertexOffset(i, j+1, k)];
+            edge e = addCell(V, {+cy, -c0});
+            if(not e)
+              out << "Failed to add Y edge from corner " << i << " " << j << " " << k << endl;
+            else {
+              edgeY[edgeYOffset(i, j, k)] = e;
+              updateEdgeGeometry(V, e);
+            }
+          }
+          if(k < Z) {
+            ccvertex cz = vertices[vertexOffset(i, j, k+1)];
+            edge e = addCell(V, {+cz, -c0});
+            if(not e)
+              out << "Failed to add Z edge from corner " << i << " " << j << " " << k << endl;
+            else {
+              edgeZ[edgeZOffset(i, j, k)] = e;
+              updateEdgeGeometry(V, e);
+            }
+          }
+        }
+
+    // ... faces
+    for(size_t i = 0 ; i <= X ; ++i)
+      for(size_t j = 0 ; j <= Y ; ++j)
+        for(size_t k = 0 ; k <= Z ; ++k) {
+          if(j < Y and k < Z) {
+            edge ey1 = edgeY[edgeYOffset(i, j, k)];
+            edge ey2 = edgeY[edgeYOffset(i, j, k+1)];
+            edge ez1 = edgeZ[edgeZOffset(i, j, k)];
+            edge ez2 = edgeZ[edgeZOffset(i, j+1, k)];
+
+            face f = addCell(V, {+ey1, +ez2, -ey2, -ez1});
+            f->normal = Point3d(1, 0, 0);
+            if(not f)
+              out << "Failed to add X face from corner " << i << " " << j << " " << k << endl;
+            else {
+              //f->pos = multiply(Point3d(i, j+0.5, k+0.5), cellSize);
+              updateFaceGeometry(V, f);
+              faceX[faceXOffset(i, j, k)] = f;
+            }
+          }
+          if(i < X and k < Z) {
+            edge ex1 = edgeX[edgeXOffset(i, j, k)];
+            edge ex2 = edgeX[edgeXOffset(i, j, k+1)];
+            edge ez1 = edgeZ[edgeZOffset(i, j, k)];
+            edge ez2 = edgeZ[edgeZOffset(i+1, j, k)];
+
+            face f = addCell(V, {+ex2, +ez1, -ex1, -ez2});
+            f->normal = Point3d(0, 1, 0);
+            if(not f)
+              out << "Failed to add Y face from corner " << i << " " << j << " " << k << endl;
+            else {
+              //f->pos = multiply(Point3d(i, j+0.5, k+0.5), cellSize);
+              updateFaceGeometry(V, f);
+              faceY[faceYOffset(i, j, k)] = f;
+            }
+          }
+          if(i < X and j < Y) {
+            edge ex1 = edgeX[edgeXOffset(i, j, k)];
+            edge ex2 = edgeX[edgeXOffset(i, j+1, k)];
+            edge ey1 = edgeY[edgeYOffset(i, j, k)];
+            edge ey2 = edgeY[edgeYOffset(i+1, j, k)];
+
+            face f = addCell(V, {+ex1, +ey2, -ex2, -ey1});
+            f->normal = Point3d(0, 0, 1);
+            if(not f)
+              out << "Failed to add Z face from corner " << i << " " << j << " " << k << endl;
+            else {
+              //f->pos = multiply(Point3d(i, j+0.5, k+0.5), cellSize);
+              updateFaceGeometry(V, f);
+              faceZ[faceZOffset(i, j, k)] = f;
+            }
+          }
+        }
+
+    // And at last, cells
+    for(size_t i = 0 ; i < X ; ++i)
+      for(size_t j = 0 ; j < Y ; ++j)
+        for(size_t k = 0 ; k < Z ; ++k) {
+          face fx1 = faceX[faceXOffset(i, j, k)];
+          face fx2 = faceX[faceXOffset(i+1, j, k)];
+          face fy1 = faceY[faceYOffset(i, j, k)];
+          face fy2 = faceY[faceYOffset(i, j+1, k)];
+          face fz1 = faceZ[faceZOffset(i, j, k)];
+          face fz2 = faceZ[faceZOffset(i, j, k+1)];
+
+          cell c = addCell(V, {+fx2, +fy2, +fz2, -fx1, -fy1, -fz1});
+          if(not c)
+            out << "Failed to add cell at pos " << i << " " << j << " " << k << endl;
+          else {
+            //c->pos = multiply(Point3d(i, j, k) + 0.5, cellSize);
+            updateCellGeometry(V, c);
+            /*
+            if ((k == Z-1) && (j == Y-1) && (i == X/2))
+              c->type = SOURCE;
+            */
+            if ((k == 0) && (j == Y/2) && (i == X/2))
+              c->type = SINK;
+            else if ((k == 0) && (j % (Y-1) == 0) && (i % (X-1) == 0))
+              c->type = SINK;
+            else if (k == Z-1)
+              c->type = L1;
+          }
+        }
+
+    return true;
+  }
+
+  bool makeDelaunayComplex(const std::vector<Point3d>& pts,
+                           const std::vector<Point3d>& anchors,
+                           const std::vector<CellType>& cell_types)
+  {
+    out << "Making Delaunay complex" << endl;
+    D.clear();
+
+    // 1 - Compute Delaunay triangulation
+
+    int dim = 3;
+
+    size_t nb_pts = pts.size();
+    size_t nb_anchors = anchors.size();
+    std::vector<Point3d> all_pts = pts;
+    all_pts.reserve(nb_pts + nb_anchors);
+    all_pts.insert(all_pts.end(), anchors.begin(), anchors.end());
+
+    size_t N = all_pts.size();
+    double *coords = all_pts.front().data(); // new coordT[dim*N];
+    boolT is_malloc = False;
+    char qhull_command[] = "qhull d QJ";
+    FILE *outfile = stdout;
+    FILE *errfile = stderr;
+    int exit_code;
+
+    exit_code = qh_new_qhull(dim, N, coords, is_malloc, qhull_command, outfile, errfile);
+    qh_setvoronoi_all();
+
+    // 2 - Parse the result and create the Delaunay tissue
+
+    facetT *facet, **facetp;
+    ridgeT *ridge, **ridgep;
+    vertexT *vertex, **vertexp;
+
+    if(!(qh CENTERtype == qh_ASvoronoi))
+    {
+      std::cerr << "Problem, the facets center are not voronoi's" << std::endl;
+    }
+
+    // 2.1 - Create all the vertices
+
+    std::unordered_map<vertexT*, ccvertex> vtx_map;
+    std::unordered_map<int, ccvertex> vertex_id_map;
+
+    FORALLvertices
+    {
+      ccvertex v;
+      v->id = qh_pointid(vertex->point);
+      if (v->id >= nb_pts)
+        v->is_anchor = true;
+      else
+        v->type = cell_types[v->id];
+      v->pos = Point3d(vertex->point[0], vertex->point[1], vertex->point[2]);
+      D.addVertex(v);
+      vtx_map[vertex] = v;
+      vertex_id_map[v->id] = v;
+    }
+
+    // 2.2 - Create all the edges, faces and cells
+
+    std::unordered_map<std::pair<ccvertex, ccvertex>, edge> edges;
+    std::unordered_map<std::pair<size_t, size_t>, edge> edge_map;
+    std::unordered_map<triplet, face, HashTriplet> face_map;
+
+    qh visit_id++;
+    FORALLfacets
+    {
+      if (!facet->upperdelaunay)
+      {
+        //out << "Facet " << facet->id << endl;
+        facet->visitid = qh visit_id;
+        cell c;
+        c->is_anchor = true; // will be switched to false later is appropriate
+        Chain<face> clist;   // list of oriented faces for defining the cell
+        setT *facet_vertices = facet->vertices;
+        int nb_cell_vertices = qh_setsize(facet_vertices);
+        Point3d cell_center;
+        // compute the center of the cell
+        FOREACHvertex_(facet->vertices)
+        {
+          ccvertex v = vtx_map[vertex];
+          cell_center += v->pos;
+        }
+        cell_center /= nb_cell_vertices;
+        c->pos = cell_center;
+        c->circumcenter = Point3d(facet->center);
+        qh_makeridges(facet);
+        FOREACHridge_(facet->ridges)
+        {
+          //out << "  New ridge" << endl;
+          face f;
+          setT *ridge_vertices = ridge->vertices;
+          int nb_face_vertices = qh_setsize(ridge_vertices);
+          std::vector<vertexT*> rvertices(nb_face_vertices);
+          std::vector<ccvertex> fvertices(nb_face_vertices);
+          Point3d face_center;
+          // compute the center of the face
+          int i_ = 0;
+          FOREACHvertex_(ridge->vertices)
+          {
+            rvertices[i_] = vertex;
+            ccvertex v = vtx_map[vertex];
+            fvertices[i_] = v;
+            face_center += v->pos;
+            i_++;
+          }
+          ccvertex v1 = fvertices[0];
+          ccvertex v2 = fvertices[1];
+          ccvertex v3 = fvertices[2];
+          Point3d cell_face_radius;
+          auto face_found = face_map.find(triplet(v1->id, v2->id, v3->id));
+          if(face_found != face_map.end())
+          {
+//            out << "  Face already created with vertices " << v1->id << ", " << v2->id << ", " << v3->id << endl;
+            f = face_found->second;
+            cell_face_radius = f->pos - c->pos;
+          }
+          else
+          {
+            face_center /= nb_face_vertices;
+            f->pos = face_center;
+            cell_face_radius = f->pos - c->pos;
+            Point3d n;
+            Chain<edge> flist;   // list of oriented edges for defining the face
+            int prev_idx = nb_face_vertices - 1;
+            Point3d prev_radius = fvertices[prev_idx]->pos - f->pos;
+            for(size_t idx = 0 ; idx < nb_face_vertices ; ++idx)
+            {
+              /*
+              vertexT *vT1 = rvertices[prev_idx];
+              vertexT *vT2 = rvertices[idx];
+              */
+              ccvertex v_edge_1, v_edge_2;
+              try {
+                v_edge_1 = fvertices.at(prev_idx);
+                v_edge_2 = fvertices.at(idx);
+              } catch(std::out_of_range e) {
+                out << "    Error, missing vertex for edge creation." << endl;
+              }
+              Point3d dp = v_edge_2->pos - f->pos;
+              Point3d dn = prev_radius ^ dp;
+              n += dn;
+              prev_radius = dp;
+              RelativeOrientation orient = pos;
+              if(v_edge_1 > v_edge_2)
+              {
+                std::swap(v_edge_1, v_edge_2);
+                orient = neg;
+              }
+              auto found = edges.find(std::make_pair(v_edge_1, v_edge_2));
+              edge e;
+              if(found != edges.end())
+              {
+                e = found->second;
+                /*
+                out << "    Edge already created between vertices " << qh_pointid(vT2->point);
+                out << " and " << qh_pointid(vT1->point) << "." << endl;
+                */
+              }
+              else
+              {
+                if (addCell(D, {+v_edge_2, -v_edge_1}, e)) {
+                  if (v_edge_1->is_anchor and v_edge_2->is_anchor)
+                    e->is_anchor = true;
+                  edges.insert(std::make_pair(std::make_pair(v_edge_1,v_edge_2), e));
+                  /*
+                  out << "    Vertex " << qh_pointid(vT2->point);
+                  out << " (" << vT2->point[0] << ", " << vT2->point[1] << ",  " << vT2->point[2] << ")";
+                  out << " linked to vertex " << qh_pointid(vT1->point);
+                  out << " (" << vT1->point[0] << ", " << vT1->point[1] << ",  " << vT1->point[2] << ")" << endl;
+                  */
+                }
+                else
+                  out << "    Edge creation failed." << endl;
+              }
+              flist.insert(orient*e);
+              prev_idx = idx;
+            }
+            normalize(n);
+            f->normal = n;
+            if (v1->is_anchor and v2->is_anchor and v3->is_anchor)
+              f->is_anchor = true;
+            face_map[triplet(v1->id, v2->id, v3->id)] = f;
+            if(!addCell(D, flist, f))
+            {
+              out << "  Face creation failed." << endl;
+              vvassert_msg(false, QString("Error adding face: %1").arg(D.errorString()));
+            }
+            //out << "    Face inserted with vertices " << v1->id << ", " << v2->id << ", " << v3->id << endl;
+          }
+          if (!f->is_anchor)
+            // The cell is not an anchor if at least one of its faces is not
+            // an anchor.
+            c->is_anchor = false;
+          // Insert the oriented face in the face list of the cell
+          double dotprod = cell_face_radius * f->normal;
+          if(dotprod > 0) {
+            clist.insert(+f);
+          }
+          else {
+            clist.insert(-f);
+          }
+        }
+        if (!addCell(D, clist, c))
+          out << "  Cell creation failed." << endl;
+        /*
+        else
+          out << "  Cell created. Is anchor: " << c->is_anchor << endl;
+        */
+      }
+      //out << "" << endl;
+    }
+
+    pmin = Point3d(-1,-1,-1);
+    pmax = Point3d(1,1,1);
+
+    qh_freeqhull(qh_ALL);  /* frees all memory used by first call */
+    int curlong, totlong;
+    qh_memfreeshort (&curlong, &totlong);
+    if (curlong || totlong) 
+      fprintf (errfile, "qhull internal warning (main): did not free %d bytes of long memory (%d pieces)\n", totlong, curlong);
+
+    //delete [] coords;
+
+    return true;
+  }
+
+  bool makeVoronoiComplex()
+  {
+    V.clear();
+    
+    //out << "" << endl;
+    out << "Constructing Voronoi complex." << endl;
+    out << "" << endl;
+
+    // 1 - Create all the vertices
+
+    std::unordered_map<cell, ccvertex> cellD_vertexV_map;
+
+    //out << "Creating the vertices." << endl;
+    size_t vV_id = 1;
+    forall const cell& cD in D.cells():
+    {
+      if(!cD->is_anchor) {
+        ccvertex vV;
+        vV->id = vV_id;
+        vV->pos = cD->circumcenter;
+        V.addVertex(vV);
+        cellD_vertexV_map[cD] = vV;
+        /*
+        out << "  Vertex " << vV << " inserted in ";
+        out << "(" << vV->pos[0] << ", " << vV->pos[1] << ",  " << vV->pos[2] << ")" << endl;
+        */
+        vV_id++;
+      }
+    }
+    out << "" << endl;
+
+    // 2 - Create all the edges
+
+    std::unordered_map<std::pair<ccvertex, ccvertex>, edge> edgesV;
+    std::unordered_map<face, edge> faceD_edgeV_map;
+
+    //out << "Creating the edges." << endl;
+    forall const cell& cD in D.cells():
+    {
+      if(!cD->is_anchor) {
+        //out << "Cell " << cD << endl;
+        forall const face& fD in D.faces(cD):
+        {
+          cell cDn = D.flip(D.T, cD, ~fD);
+          if(!fD->is_anchor) {
+            //out << "  Face " << fD << endl;
+            ccvertex vV1 = cellD_vertexV_map[cD];
+            ccvertex vV2 = cellD_vertexV_map[cDn];
+            if(vV1 > vV2) {
+              std::swap(vV1, vV2);
+            }
+            auto found = edgesV.find(std::make_pair(vV1, vV2));
+            if(found == edgesV.end()) {
+              edge eV = addCell(V, {+vV2, -vV1});
+              if(eV) {
+                updateEdgeGeometry(V, eV);
+                edgesV.insert(std::make_pair(std::make_pair(vV1,vV2), eV));
+                faceD_edgeV_map[fD] = eV;
+                /*
+                   out << "    Edge " << eV << " from vertex " << vV1;
+                   out << " (" << vV1->pos[0] << ", " << vV1->pos[1] << ",  " << vV1->pos[2] << ")";
+                   out << " to vertex " << vV2;
+                   out << " (" << vV2->pos[0] << ", " << vV2->pos[1] << ",  " << vV2->pos[2] << ")" << endl;
+                 */
+              }
+            }
+          }
+        }
+      }
+    }
+    //out << "" << endl;
+
+    // 3 - Create all the faces
+
+    std::unordered_map<edge, face> edgeD_faceV_map;
+
+    //out << "Creating the faces." << endl;
+    forall const edge& eD in D.edges():
+    {
+      if(!eD->is_anchor) {
+        //out << "Edge " << eD << endl;
+        Chain<edge> flist;   // list of oriented edges for defining the face
+        int nb_face_vertices = D.nbCojoints(eD);
+        std::vector<ccvertex> fvertices(nb_face_vertices);
+        int i = 0;
+        forall const cell& cD in D.orderedCojoints(+eD, TD):
+        {
+          //out << "  Cell " << cD << endl;
+          fvertices[i] = cellD_vertexV_map[cD];
+          i++;
+        }
+        int prev_idx = nb_face_vertices - 1;
+        for(size_t idx = 0 ; idx < nb_face_vertices ; ++idx)
+        {
+          //out << "  Cell #" << idx << endl;
+          ccvertex vV1, vV2;
+          try {
+            vV1 = fvertices.at(prev_idx);
+            vV2 = fvertices.at(idx);
+          } catch(std::out_of_range e) {
+            out << "    Error, missing vertex for face creation." << endl;
+          }
+          /*
+          out << "    Vertex " << vV1 << endl;
+          out << "    Vertex " << vV2 << endl;
+          */
+          RelativeOrientation orient = pos;
+          if(vV1 > vV2)
+          {
+            std::swap(vV1, vV2);
+            orient = neg;
+          }
+          try {
+            edge eV = edgesV.at(std::make_pair(vV1, vV2));
+            /*
+            out << "    Edge: " << eV << endl;
+            out << "    Relative orientation: " << orient << endl;
+            */
+            flist.insert(orient*eV);
+          } catch(std::out_of_range e) {
+            out << "    Error, no edge from " << vV1 << " to " << vV2 << endl;
+          }
+          prev_idx = idx;
+        }
+        face fV = addCell(V, flist);
+        if(fV) {
+          /*
+          out << "  Face created." << endl;
+          out << "  Edge chain: " << flist << endl;
+          */
+          updateFaceGeometry(V, fV);
+          edgeD_faceV_map[eD] = fV;
+        }
+        else {
+          out << "  Face creation failed." << endl;
+          out << "  Edge chain: " << flist << endl;
+          auto b = V.boundary(flist);
+          out << "  Edge chain boundary: " << b << endl;
+        }
+      }
+    }
+    //out << "" << endl;
+
+    // 3 - Create all the cells
+
+    //out << "Creating the cells." << endl;
+    forall const ccvertex& vD in D.vertices():
+    {
+      if(!vD->is_anchor) {
+        //out << "Vertex " << vD << endl;
+        Chain<face> clist;   // list of oriented faces for defining the cell
+        forall const edge& eD in D.cofaces(vD):
+        {
+          //out << "  Edge " << eD << endl;
+          face fV = edgeD_faceV_map[eD];
+          // Insert the oriented face in the face list of the cell
+          Point3d cell_face_radius = fV->pos - vD->pos;
+          double dotprod = cell_face_radius * fV->normal;
+          if(dotprod > 0) {
+            clist.insert(+fV);
+          }
+          else {
+            clist.insert(-fV);
+          }
+        }
+        cell cV = addCell(V, clist);
+        if(cV) {
+          //out << "    Cell created." << endl;
+          cV->type = vD->type;
+          updateCellGeometry(V, cV);
+        }
+        else {
+          out << "    Cell creation failed." << endl;
+          out << "    " << clist << endl;
+          auto b = V.boundary(clist);
+          out << "    " << b << endl;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  // Create SolverGraph
+  void createSolverGraph(const Tissue& T)
+  {
+    out << "" << endl;
+    out << "Constructing the solver graph." << endl;
+    out << "" << endl;
+
+    std::unordered_map<cell,node> cells;
+    std::unordered_map<oriented_face,node> membranes;
+    std::unordered_map<face,node> apoplasts;
+
+    S.clear();
+
+    // Create cells and membranes
+    for(const cell c: T.cells()) {
+      node n;
+      //n->setLink(make_unique<CellLink>(c));
+      n->setLink(new CellLink(c));
+      if (c->type == L1)
+        n->is_L1 = true;
+      n->size = c->volume;
+      n->read();
+      cells[c] = n;
+      if (S.insert(n) == S.end())
+          out << "  Cell node insertion failed." << endl;
+      for(const oriented_face& of: T.boundary(+c)) 
+        if (not T.border(~of) and of->area > min_membrane_area) {
+          node n_membrane;
+          //n_membrane->setLink(make_unique<MembraneLink>(of));
+          n_membrane->setLink(new MembraneLink(of));
+          //out << "Creating membrane " << n_membrane.num() << " for 2-cell " << (~of).num() << endl;
+          if (n->is_L1)
+            n_membrane->is_L1 = true;
+          if (c->type == SINK)
+            n_membrane->is_sink_membrane = true;
+          /*
+          for (const cell& cn: T.cofaces(~of))
+          {
+            if (c->type != L1)
+              n_membrane->is_L1 = false;
+          }
+          */
+          n_membrane->size = of->area;
+          n_membrane->read();
+          if (S.insert(n_membrane) == S.end())
+              out << "  Membrane node insertion failed." << endl;
+          membranes[of] = n_membrane;
+        }
+    }
+
+    // Create apoplasts
+    for(const face f: T.faces()) 
+      if (not T.border(f) and f->area > min_membrane_area) {
+        node n_apoplast;
+        //n_apoplast->setLink(make_unique<ApoplastLink>(f));
+        n_apoplast->setLink(new ApoplastLink(f));
+        n_apoplast->size = f->volume;
+        n_apoplast->read();
+        if (S.insert(n_apoplast) == S.end())
+            out << "  Apoplast node insertion failed." << endl;
+        apoplasts[f] = n_apoplast;
+      }
+
+    // Create edges
+    for(const cell c: T.cells()) {
+      node n_cell = cells.at(c);
+      vvassert(n_cell->type == NT_CELL);
+      for(const oriented_face& of: T.boundary(+c)) {
+        if (not T.border(~of) and of->area > min_membrane_area) {
+          node n_membrane = membranes.at(of);
+          vvassert(n_membrane->type == NT_MEMBRANE);
+          node n_apoplast = apoplasts.at(~of);
+          vvassert(n_apoplast->type == NT_APOPLAST);
+
+          //out << "Linking membrane " << n_membrane.num() << " to cell " << n_cell.num() << endl;
+
+          // Edge from cell to membrane
+          if (!S.insertEdge(n_cell, n_membrane))
+              out << "  Edge insertion failed between cell and membrane." << endl;
+          if (!S.insertEdge(n_membrane, n_cell))
+              out << "  Edge insertion failed between membrane and cell." << endl;
+
+          // Edge from membrane to apoplast
+          if (!S.insertEdge(n_membrane, n_apoplast))
+              out << "  Edge insertion failed between membrane and apoplast." << endl;
+          if (!S.insertEdge(n_apoplast, n_membrane))
+              out << "  Edge insertion failed between apoplast and membrane." << endl;
+
+          // Edge from membrane to membrane
+          for (const oriented_face& of2: T.boundary(+c)) {
+            if (of != of2 and T.areNeighbors(~of, ~of2)
+                and not T.border(~of2) and of2->area > min_membrane_area) {
+              node n_membrane2 = membranes.at(of2);
+              vvassert(n_membrane2->type == NT_MEMBRANE);
+              double edge_length = -1;
+              for (const edge& e: T.bounds(~of2)) {
+                if (T.isBound(~of, e))
+                  edge_length = e->length;
+              }
+              vvassert(edge_length > 0);
+              nlink nl = S.insertEdge(n_membrane, n_membrane2);
+              if (!nl)
+                out << "  Edge insertion failed between membrane and membrane." << endl;
+              nl->length = edge_length;
+            }
+          }
+        }
+      }
+    }
+
+    // Connect apoplasts to apoplasts
+    for (const face& f1: T.faces()) {
+      if (not T.border(f1) and f1->area > min_membrane_area) {
+        node n1 = apoplasts.at(f1);
+        for (const face& f2: T.neighbors(f1)) {
+          if (not T.border(f2) and f2->area > min_membrane_area) {
+            node n2 = apoplasts.at(f2);
+            double edge_area = -1;
+            for (const edge& e: T.bounds(f2)) {
+              if (T.isBound(f1, e))
+                edge_area = e->area;
+            }
+            nlink nl = S.insertEdge(n1, n2);
+            if (!nl)
+              out << "  Edge insertion failed between apoplast and apoplast." << endl;
+            vvassert(edge_area > 0);
+            nl->area = edge_area;
+          }
+        }
+      }
+    }
+
+    // some tests
+    for(const auto& n: S) {
+      switch(n->type) {
+        case NT_CELL:
+          for(const auto& nn: S.neighbors(n))
+            vvassert(nn->type == NT_MEMBRANE);
+          break;
+        case NT_MEMBRANE:
+          {
+            bool found_cell = false, found_apo = false;
+            // vvassert(S.valence(n) == 2);  // not if membranes are linked
+            for(const auto& nn: S.neighbors(n)) {
+              switch(nn->type) {
+                case NT_CELL:
+                  found_cell = true;
+                  break;
+                case NT_APOPLAST:
+                  found_apo = true;
+                  break;
+              }
+            }
+            vvassert(found_cell);
+            vvassert(found_apo);
+          }
+          break;
+        case NT_APOPLAST:
+          for(const auto& nn: S.neighbors(n)) {
+            vvassert(nn->type != NT_CELL);
+          }
+          break;
+      }
+    }
+
+    out << "SolverGraph constructed." << endl;
+  }
+  
+  double totalCellPIN(const Tissue& T, const cell& c)
+  {
+    double PIN_total_cell = c->volume * c->PIN;
+    for (const oriented_face& of: T.boundary(+c)) {
+      double PIN = (of.orientation() == cellflips::pos)
+                   ? of->PINpos : of->PINneg;
+      double APIN = (of.orientation() == cellflips::pos)
+                    ? of->APINpos : of->APINneg;
+      PIN_total_cell += of->area * (PIN + APIN);
+    }
+    return PIN_total_cell;
+  }
+
+  DescVariables computeDescVariables(const Tissue& T,
+                                     const std::vector<ConvergenceCellL1> cv_cells_L1)
+  {
+    double total_auxin = 0;
+    double max_auxin = 0;
+    double mean_auxin = 0;
+    double max_auxin_apoplast = 0;
+    double max_PIN_cell = 0;
+    double max_PIN_membrane = 0;
+    double min_PIN_membrane = HUGE_VAL;
+    double PIN_total_cell = 0;
+    double PIN_total_membranes = 0;
+    double max_APIN_membrane = 0;
+    double APIN_total_membranes = 0;
+    double max_AAUX_membrane = 0;
+    double AAUX_total_membranes = 0;
+    double max_PIN_gain = 0;
+    double max_dPIN_membrane = 0;
+    double PIN_L1_toward_L2 = 0;
+    size_t nb_cv_cells = 0;
+    
+    // the following variables are used for computing the polarisation factor
+    /*
+    double P_factor = 0;
+    size_t canalPos = gridSize[1]/2;
+    size_t cPos_in_canal = 0;
+    size_t cnPos_in_canal = 0;
+    size_t cPos_in_L1 = 0;
+    size_t cnPos_in_L1 = 0;
+    */
+
+    double S_factor = 0;
+
+    size_t R = gridSize.x();
+    size_t nb_inner_cells_L1 = 0;
+
+    // cells and membranes
+    for(const cell& c: T.cells()) {
+      double x = c->pos.x();
+      double y = c->pos.y();
+      double z = c->pos.z();
+      total_auxin += c->volume * c->auxin;
+      double PIN_total_cell_max = PIN_total * c->area/6;
+      PIN_total_cell = c->volume * c->PIN;
+      if (c->auxin > max_auxin)
+        max_auxin = c->auxin;
+      if (c->PIN > max_PIN_cell)
+        max_PIN_cell = c->PIN;
+      if (std::abs(c->dauxin) > S_factor)
+        S_factor = std::abs(c->dauxin); 
+      PIN_total_membranes = 0;
+      APIN_total_membranes = 0;
+      AAUX_total_membranes = 0;
+      for (const oriented_face& of: T.boundary(+c)) {
+        double dPIN = std::abs((of.orientation() == cellflips::pos)
+                               ? of->dPINpos : of->dPINneg);
+        double PIN = (of.orientation() == cellflips::pos)
+                     ? of->PINpos : of->PINneg;
+        double APIN = (of.orientation() == cellflips::pos)
+                      ? of->APINpos : of->APINneg;
+        double AAUX = (of.orientation() == cellflips::pos)
+                      ? of->AAUXpos : of->AAUXneg;
+        if (PIN > max_PIN_membrane)
+          max_PIN_membrane = PIN;
+        if (PIN < min_PIN_membrane)
+          min_PIN_membrane = PIN;
+        if (dPIN > max_dPIN_membrane)
+          max_dPIN_membrane = dPIN; 
+        if (APIN > max_APIN_membrane)
+          max_APIN_membrane = APIN;
+        if (AAUX_total_membranes > max_AAUX_membrane)
+          max_AAUX_membrane = AAUX;
+        PIN_total_cell += of->area * (PIN + APIN);
+        PIN_total_membranes += of->area * PIN;
+        APIN_total_membranes += of->area * APIN;
+        AAUX_total_membranes += of->area * AAUX;
+      }
+      //if (c->type == L1 and std::abs(PIN_total_cell - PIN_total_cell_max) > max_PIN_gain)
+      //  max_PIN_gain = PIN_total_cell - PIN_total * c->volume;
+      if (c->type == CORPUS or c->type == L1) {
+        if (PIN_total_cell > PIN_total_cell_max) {
+          /*
+          out << "Excessive PIN amount in (" << x << ", " << y << ", " << z << "): "
+            << PIN_total_cell << endl;
+          */
+          c->PIN_excess = true;
+        }
+        else {
+          c->PIN_excess = false;
+        }
+      }
+      // Compute mean auxin concentration in in the inner part of L1
+      // and quantity of PIN pointing from L1 to L2.
+      double r = std::sqrt(x*x + y*y);
+      if (c->type == L1 and r < (R - 1.)) {
+        mean_auxin += c->auxin;
+        nb_inner_cells_L1 += 1;
+        for (const oriented_face& of: V.boundary(+c)) {
+          for (const cell& cn: V.cofaces(~of)) {
+            if (cn->type != L1) {
+              double PIN = (of.orientation() == cellflips::pos)
+                ? of->PINpos : of->PINneg;
+              PIN_L1_toward_L2 += of->area * PIN;
+            }
+          }
+        }
+      }
+    }
+
+    mean_auxin = mean_auxin / nb_inner_cells_L1;
+
+    // apoplasts
+    for(const face& f: T.faces()) {
+      total_auxin += f->volume * f->auxin;
+      if (f->auxin > max_auxin_apoplast)
+        max_auxin_apoplast = f->auxin;
+    }
+
+    for (const ConvergenceCellL1& cv_cell: cv_cells_L1)
+    {
+      Point3d pos = cv_cell.position;
+      double x = pos.x();
+      double y = pos.y();
+      double r = std::sqrt(x*x + y*y);
+      double cv_factor = cv_cell.cv_factor;
+      double normalised_auxin = cv_cell.auxin / mean_auxin;
+      if (cv_factor > min_cv_factor and normalised_auxin > 1 and r < (R - 1.)) {
+        nb_cv_cells++;
+      }
+    }
+
+    DescVariables vars =
+    {
+      total_auxin,
+      max_auxin,
+      mean_auxin,
+      max_auxin_apoplast,
+      max_PIN_cell,
+      max_PIN_membrane,
+      min_PIN_membrane,
+      max_APIN_membrane,
+      max_AAUX_membrane,
+      max_PIN_gain,
+      S_factor,
+      max_dPIN_membrane,
+      PIN_L1_toward_L2,
+      nb_cv_cells
+    };
+    return vars;
+  }
+
+  MaxdPINVariables compute_max_dPIN_variables(const Tissue& T)
+  {
+    // look for the membrane with highest dPIN
+    double max_dPIN = 0;
+    oriented_face fmax;
+    cell cmax(0);
+    for(const cell& c: T.cells()) {
+      for (const oriented_face& of: T.boundary(+c)) {
+        double dPIN_m = std::abs(of.orientation() == cellflips::pos
+                                 ? of->dPINpos: of->dPINneg);
+        if (dPIN_m > max_dPIN) {
+          max_dPIN = dPIN_m; 
+          fmax = of;
+          cmax = c;
+        }
+      }
+    }
+
+    int num = (~fmax).num();
+    double area = (~fmax)->area;
+    double PIN = (fmax.orientation() == cellflips::pos)
+                 ? fmax->PINpos : fmax->PINneg;
+    double dPIN = (fmax.orientation() == cellflips::pos)
+                  ? fmax->dPINpos : fmax->dPINneg;
+    double APIN = (fmax.orientation() == cellflips::pos)
+                  ? fmax->APINpos : fmax->APINneg;
+    double dAPIN = (fmax.orientation() == cellflips::pos)
+                  ? fmax->dAPINpos : fmax->dAPINneg;
+    double AAUX = (fmax.orientation() == cellflips::pos)
+                  ? fmax->AAUXpos : fmax->AAUXneg;
+    double dAAUX = (fmax.orientation() == cellflips::pos)
+                   ? fmax->dAAUXpos : fmax->dAAUXneg;
+    double auxin_c = cmax->auxin;
+    double dauxin_c = cmax->dauxin;
+    double auxin_a = (~fmax)->auxin;
+    double dauxin_a = (~fmax)->dauxin;
+
+    MaxdPINVariables vars =
+    {
+      num,
+      area,
+      PIN,
+      dPIN,
+      APIN,
+      dAPIN,
+      AAUX,
+      dAAUX,
+      auxin_c,
+      dauxin_c,
+      auxin_a,
+      dauxin_a
+    };
+    return vars;
+  }
+
+  std::vector<ConvergenceCellL1> search_convergence_cells(const Tissue& T)
+  {
+    std::vector<ConvergenceCellL1> cv_cells_L1;
+    for (const cell& c: T.cells()) {
+      //if (c->type == L1 and c->auxin > a_th) {
+      if (c->type == L1) {
+        // computing the convergence factor
+        double Cv_factor = 0;
+        double total_PIN_c = totalCellPIN(T, c);
+        for (const oriented_face& of: T.boundary(+c)) {
+          if (T.flip(T.T, c, ~of)) {
+            cell cn = T.flip(T.T, c, ~of);
+            if (cn->type == L1) {
+              double PIN_outward = (of.orientation() == cellflips::pos)
+                                    ? of->PINpos : of->PINneg;
+              double PIN_inward = (of.orientation() == cellflips::neg)
+                                   ? of->PINpos : of->PINneg;
+              Cv_factor += of->area * (PIN_inward/totalCellPIN(T, cn)
+                                       - PIN_outward/total_PIN_c);
+            }
+          }
+        }
+        if (Cv_factor > 0) {
+          // normalising to the total quantity of PIN
+          Cv_factor *= 5 / PIN_total;
+          ConvergenceCellL1 cv_cell =
+          {
+            c,
+            c->pos,
+            Cv_factor,
+            c->auxin
+          };
+          cv_cells_L1.push_back(cv_cell);
+        }
+      }
+    }
+    std::sort(cv_cells_L1.begin(), cv_cells_L1.end(),
+              [](const ConvergenceCellL1& c1, const ConvergenceCellL1& c2)
+              { return c1.cv_factor > c2.cv_factor; } );
+    
+    return cv_cells_L1;
+  }
+
+  PolCell search_most_polarised_path(const Tissue& T, const cell& src)
+  {
+    // Search the most polarised path between a source cell and the sink.
+
+    /*
+    Pseudocode:
+    
+     initialise heap with source_PolCell (and source cell marked as used)
+
+     loop while the heap is not empty
+       pop n from the heap
+       foreach non-used neighbor of n.pol_cell
+         construct PolCell n'
+         if n'.pol_cell is sink
+           return n'
+         else
+           push n' into the heap and mark n'.pol_cell as used
+
+     return source_PolCell
+    */
+
+    // Create and initialise a map of used/unused cells.
+    size_t nb_cells = T.nbCells();
+    std::unordered_map<cell,bool> cell_usage(nb_cells);
+    for (const cell& c: T.cells())
+    {
+      cell_usage[c] = false;
+    }
+    cell_usage[src] = true;
+
+    std::vector<cell> empty_path(0);
+    PolCell src_PolCell =
+    {
+      src,
+      0,
+      0,
+      empty_path
+    };
+
+    std::vector<PolCell> heap_PolCell(1);
+    heap_PolCell[0] = src_PolCell;
+    std::make_heap(heap_PolCell.begin(), heap_PolCell.end(), compare_PolCells);
+
+    while (!heap_PolCell.empty())
+    {
+      std::pop_heap(heap_PolCell.begin(), heap_PolCell.end(), compare_PolCells);
+      PolCell n = heap_PolCell.back();
+      heap_PolCell.pop_back();
+      cell c = n.pol_cell;
+      for (const oriented_face& of: T.boundary(+c))
+      {
+        for (const cell& cn: T.cofaces(~of))
+        {
+          if (cn != c and !cell_usage.at(cn))
+          {
+            double PIN_c_cn = (of.orientation() == cellflips::pos)
+                              ? of->PINpos : of->PINneg;
+            double PIN_cn_c = (of.orientation() == cellflips::neg)
+                              ? of->PINpos : of->PINneg;
+            double pol_c_cn = of->area * (PIN_c_cn - PIN_cn_c);
+
+            if (pol_c_cn < min_pol)
+              continue;
+
+            std::vector<cell> path(n.path);
+            path.push_back(c);
+
+            PolCell nn = {
+              cn,
+              n.distance + 1,
+              n.pol_factor + pol_c_cn,
+              path
+            };
+
+            if (cn->type == SINK)
+              return nn;
+            else
+            {
+              heap_PolCell.push_back(nn);
+              std::push_heap(heap_PolCell.begin(), heap_PolCell.end(), compare_PolCells);
+              cell_usage[c] = true;
+            }
+          }
+        }
+      }
+    }
+
+    return src_PolCell;
+  }
+
+  void updateEdgeStatus(const edge& e)
+  {
+    size_t ncj = D.nbCojoints(e);
+    //e->crease = (ncj > 2) or (C.border(e) and ncj == 2);
+  }
+
+  void updateEdgeStatus(const Tissue& T, const edge& e)
+  {
+    size_t ncj = T.nbCojoints(e);
+    //e->crease = (ncj > 2) or (C.border(e) and ncj == 2);
+  }
+
+  void updateSceneSize()
+  {
+    if(!D.empty())
+    {
+      pmin = Point3d(HUGE_VAL, HUGE_VAL, HUGE_VAL);
+      pmax = -pmin;
+      forall const ccvertex& v in V.vertices():
+      {
+        Point3d p = v->pos;
+        if(p.x() < pmin.x()) pmin.x() = p.x();
+        if(p.y() < pmin.y()) pmin.y() = p.y();
+        if(p.z() < pmin.z()) pmin.z() = p.z();
+        if(p.x() > pmax.x()) pmax.x() = p.x();
+        if(p.y() > pmax.y()) pmax.y() = p.y();
+        if(p.z() > pmax.z()) pmax.z() = p.z();
+      }
+    }
+  }
+
+  void updateFaceGeometry(const face& f)
+  {
+    const std::vector<ccvertex>& vs = D.orderedVertices(+f);
+    updateFaceGeometry(f, vs);
+  }
+
+  void updateFaceGeometry(const Tissue& T, const face& f)
+  {
+    const std::vector<ccvertex>& vs = T.orderedVertices(+f);
+    updateFaceGeometry(f, vs);
+  }
+
+  void updateFaceGeometry(const face& f, const std::vector<ccvertex>& vs)
+  {
+    size_t nb_vertices = vs.size();
+    Point3d pos, n;
+    for(const ccvertex &v: vs) {
+      pos += v->pos;
+    }
+    f->pos = pos/nb_vertices;
+    Point3d prev_radius = vs[nb_vertices - 1]->pos - f->pos;
+    for(size_t idx = 0 ; idx < nb_vertices ; ++idx)
+    {
+      ccvertex v;
+      try {
+        v = vs.at(idx);
+      } catch(std::out_of_range e) {
+        out << "Error, missing face vertex." << endl;
+      }
+      Point3d dp = v->pos - f->pos;
+      Point3d dn = prev_radius ^ dp;
+      n += dn;
+      prev_radius = dp;
+    }
+    double l = norm(n);
+    f->area = l/2;
+    f->volume = f->area * apoplast_width;
+    f->normal = n/l;
+  }
+
+  // TODO: Check volume of a polyhedron
+  void updateCellGeometry(const cell& c)
+  {
+    double vol = 0;
+    Point3d center, pmin(HUGE_VAL,HUGE_VAL,HUGE_VAL), pmax(-HUGE_VAL,-HUGE_VAL,-HUGE_VAL);
+    double surface = 0;
+    const Chain<face>& fs = D.boundary(+c);
+    forall const oriented_face& of in fs:
+    {
+      const Point3d& n = of->normal;
+      double area = of->area;
+      surface += area;
+      center += area*of->pos;
+      if(of.orientation() == neg) area *= -1;
+      //const vertex& v = C.anyBound<0>(~of);
+      vol += area*n * of->pos;
+    }
+    c->volume = vol/3;
+    c->pos = center / surface;
+  }
+
+  void updateCellGeometry(const Tissue& T, const cell& c)
+  {
+    double vol = 0;
+    Point3d center, pmin(HUGE_VAL,HUGE_VAL,HUGE_VAL), pmax(-HUGE_VAL,-HUGE_VAL,-HUGE_VAL);
+    double surface = 0;
+    const Chain<face>& fs = T.boundary(+c);
+    forall const oriented_face& of in fs:
+    {
+      const Point3d& n = of->normal;
+      double area = of->area;
+      surface += area;
+      center += area*of->pos;
+      if(of.orientation() == neg) area *= -1;
+      //const vertex& v = C.anyBound<0>(~of);
+      vol += area*n * of->pos;
+    }
+    c->volume = vol/3;
+    c->area = surface;
+    c->pos = center / surface;
+  }
+
+  void updateGeometry()
+  {
+    // First, update edges
+    forall const edge& e in D.edges():
+      updateEdgeGeometry(e);
+    // Then, update faces
+    forall const face& f in D.faces():
+      updateFaceGeometry(f);
+    // At last, update the volumes
+    forall const cell& c in D.cells():
+      updateCellGeometry(c);
+  }
+
+  void updateGeometry(const Tissue& T)
+  {
+    // First, update edges
+    forall const edge& e in T.edges():
+      updateEdgeGeometry(T, e);
+    // Then, update faces
+    forall const face& f in T.faces():
+      updateFaceGeometry(T, f);
+    // At last, update the volumes
+    forall const cell& c in T.cells():
+      updateCellGeometry(T, c);
+  }
+
+  void updateEdgeGeometry(const edge& e)
+  {
+    ccvertex v1(0),v2(0);
+    std::tie(v1,v2) = D.orderedVertices(+e);
+    e->length = norm(v1->pos - v2->pos);
+    e->area = e->length * apoplast_width;
+  }
+
+  void updateEdgeGeometry(const Tissue& T, const edge& e)
+  {
+    ccvertex v1(0),v2(0);
+    std::tie(v1,v2) = T.orderedVertices(+e);
+    e->length = norm(v1->pos - v2->pos);
+    e->area = e->length * apoplast_width;
+  }
+
+  QString displayVertices(const std::vector<ccvertex>& vs)
+  {
+    QStringList sl;
+    forall ccvertex v in vs:
+      sl << QString("[%1,pos=%2]").arg(v.num()).arg(toString(v->pos));
+    return QString("[%1]").arg(sl.join(" "));
+  }
+
+  void updateNormals()
+  {
+    forall const auto& fs in face_shape:
+    {
+      updateFaceGeometry(fs.first, fs.second);
+      //out << "updateFaceGeometry(" << fs.first << ", " << displayVertices(fs.second) << ") -> f->normal = " << fs.first->normal << endl;
+    }
+  }
+
+  void setStatus()
+  {
+    setStatusMessage(QString("# cells: %1 - # faces: %2 - # edges: %3 # vertices: %4")
+                     .arg(D.nbCells<3>()).arg(D.nbCells<2>())
+                     .arg(D.nbCells<1>()).arg(D.nbCells<0>()));
+  }
+
+  Colorf cellColor(const cell& c) const
+  {
+    double value = c->auxin / maxViewAuxin;
+    switch(c->type)
+    {
+      case L1:
+      case SOURCE:
+        return palette.selectColor(colorL1Begin, colorL1End, value, value);
+      case CORPUS:
+        return palette.selectColor(colorCellsBegin, colorCellsEnd, value, value);
+        break;
+      case SINK:
+        return palette.getColor(colorSink);
+    }
+    return Colorf();
+  }
+
+  Colorf faceColor(const oriented_face& of) const
+  {
+    //double value = of->auxin / maxViewAuxin;
+    //double value = (of.orientation() == cellflips::pos ? std::abs(of->dPINpos): std::abs(of->dPINneg)) / maxViewPIN;
+    double value = (of.orientation() == cellflips::pos ? of->PINpos: of->PINneg) / maxViewPIN;
+    //double value = (of.orientation() == cellflips::pos ? of->VAFpos: of->VAFneg) / maxViewVAF;
+    return palette.selectColor(colorPINBegin, colorPINEnd, value, value);
+  }
+
+  // Drawing
+  void initDraw(Viewer *viewer) override
+  {
+    viewer->setMaxPeeling(30);
+    viewer->setBackgroundColor(palette.getColor(0));
+    viewer->setForegroundColor(palette.getColor(255));
+  }
+
+  void updateCellsPos()
+  {
+    forall const cell& c in D.cells():
+    {
+      //CellSet<ccvertex> vs = C.vertices(c);
+      Point3d center;
+      int i = 0;
+      //forall const ccvertex& v in vs:
+      forall const ccvertex& v in D.vertices(c): {
+        center += v->pos;
+        i++;
+      }
+      //c->pos = center / vs.size();
+      c->pos = center / i;
+    }
+  }
+
+  void updateCellsPos(const Tissue& T)
+  {
+    forall const cell& c in T.cells():
+    {
+      //CellSet<ccvertex> vs = C.vertices(c);
+      Point3d center;
+      int i = 0;
+      //forall const ccvertex& v in vs:
+      forall const ccvertex& v in T.vertices(c): {
+        center += v->pos;
+        i++;
+      }
+      //c->pos = center / vs.size();
+      c->pos = center / i;
+    }
+  }
+
+  double sigmoid(double value, double k)
+  {
+    return 1 / (1 + std::exp(-value*k));
+  }
+
+  /**
+   * Update the vector containing the time derivatives at a cell
+   */
+  void updateDerivatives(const node& n, const rd_tag_t&)
+  {
+    Point5d dc = Point5d(0, 0, 0, 0, 0);
+    switch(n->type) {
+      case NT_CELL:
+        {
+          bool is_sink = false;
+          double V_c = n->size;   // cell volume
+          bool PIN_excess = static_cast<CellLink*>(n->link)->cel->PIN_excess;
+          double nu_apin = nu_apin_low + (nu_apin_high - nu_apin_low) * sigmoid(n->c[AUXIN] - a_th, nu_apin_slope);
+          switch(static_cast<CellLink*>(n->link)->cel->type) {
+            case CORPUS:
+              {
+                dc[AUXIN] += sigma_a - mu_a * n->c[AUXIN];
+                if (not PIN_excess)
+                  dc[PIN] += (rho_p_0 + rho_p * n->c[AUXIN]) / (1 + kappa_p * n->c[PIN]);
+                dc[PIN] -= mu_p_star * n->c[PIN];
+                break;
+              }
+            case SOURCE:
+              dc[AUXIN] += sigma_a_source - mu_a * n->c[AUXIN];
+              break;
+            case L1:
+              {
+                dc[AUXIN] += sigma_a_L1 - mu_a * n->c[AUXIN];
+                if (not PIN_excess)
+                  dc[PIN] += (rho_p_0_L1 + rho_p_L1 * n->c[AUXIN]) / (1 + kappa_p * n->c[PIN]);
+                dc[PIN] -= mu_p_star * n->c[PIN];
+                break;
+              }
+            case SINK:
+              dc[AUXIN] += sigma_a - mu_a_sink * n->c[AUXIN];
+              is_sink = true;
+              break;
+          }
+          forall const node& nn in S.neighbors(n): {
+            switch(nn->type) {
+              case NT_APOPLAST:
+                vvassert_msg(false, "Link between cell and apoplast!");
+                break;
+              case NT_MEMBRANE:
+                {
+                  vvassert(nu_apin >= 0);
+                  double S_m = nn->size;   // membrane area
+                  double VAF_effect = pow(b_VAF, nn->c[VAF]);  // VAF promotes PIN exocytosis
+                  dc[AUXIN] += S_m/V_c * (nu_apin * nn->c[APIN] * nn->c[AAUX]
+                                          + T_in2 * nn->c[AAUX]
+                                          - T_out1 * n->c[AUXIN] * nn->c[PIN]);
+                  dc[PIN] -= S_m/V_c * (sigma_p
+                                        + VAF_effect * sigma_apin * nn->c[APIN] * nn->c[APIN]
+                                        + sigma_aaux * nn->c[AAUX] * nn->c[AAUX]
+                                       ) * n->c[PIN] / (1 + kappa_p_m * nn->c[PIN]);
+                  dc[PIN] += S_m/V_c * mu_p * nn->c[PIN];
+                }
+                break;
+              case NT_CELL:
+                vvassert_msg(false, "Link between cells!");
+                break;
+            }
+          }
+          if (is_sink)
+            dc[PIN] = 0;
+        }
+        break;
+      case NT_APOPLAST:
+        {
+          double V_a = n->size;   // apoplast volume
+          dc[VAF] -= mu_VAF * n->c[VAF];
+          forall const node& nn in S.neighbors(n): {
+            switch(nn->type) {
+              case NT_APOPLAST:
+                {
+                  double S_a_a = S.edge(n, nn)->area;  // area between two neighbor apoplast elements
+                  dc[AUXIN] += S_a_a/V_a * (d_a * (nn->c[AUXIN] - n->c[AUXIN]));
+                  dc[VAF] += S_a_a/V_a * (d_VAF * (nn->c[VAF] - n->c[VAF]));
+                }
+                break;
+              case NT_MEMBRANE:
+                {
+                  double m_AUX = AUX;
+                  if (nn->is_L1)
+                    m_AUX = AUX_L1;
+                  double S_m = nn->size;
+                  dc[AUXIN] += S_m/V_a * (T_out2 * nn->c[APIN]
+                                          - T_in1 * n->c[AUXIN] * m_AUX);
+                  dc[VAF] += S_m/V_a * (k_u * nn->c[VAF] - k_b * n->c[VAF]);
+                  if (nn->is_sink_membrane)
+                    dc[VAF] += S_m/V_a * rho_VAF;
+                }
+                break;
+              case NT_CELL:
+                vvassert_msg(false, "Link between cell and apoplast!");
+                break;
+            }
+          }
+        }
+        break;
+      case NT_MEMBRANE:
+        {
+          bool is_sink = false;
+          double S_m = n->size;   // membrane area
+          double nu_apin = -1;
+          double m_AUX = AUX;
+          if (n->is_L1)
+            m_AUX = AUX_L1;
+          //if (n->c[PIN] > PIN_0)
+          dc[PIN] -= mu_p * n->c[PIN];
+          dc[PIN] += T_out2 * n->c[APIN];
+          dc[APIN] -= T_out2 * n->c[APIN];
+          dc[VAF] -= k_u * n->c[VAF];
+          forall const node& nn in S.neighbors(n): {
+            switch(nn->type)
+            {
+              case NT_CELL:
+                {
+                  is_sink = static_cast<CellLink*>(nn->link)->cel->type == SINK;
+                  double VAF_effect = pow(b_VAF, n->c[VAF]);  // VAF promotes PIN exocytosis
+                  dc[PIN] += (sigma_p
+                              + VAF_effect * sigma_apin * n->c[APIN] * n->c[APIN]
+                              + sigma_aaux * n->c[AAUX] * n->c[AAUX]
+                             ) * nn->c[PIN] / (1 + kappa_p_m * n->c[PIN]);
+                  dc[PIN] -= T_out1 * n->c[PIN] * nn->c[AUXIN];
+                  dc[APIN] += T_out1 * n->c[PIN] * nn->c[AUXIN];
+                  nu_apin = nu_apin_low  + (nu_apin_high - nu_apin_low) * sigmoid(nn->c[AUXIN] - a_th, nu_apin_slope);
+                }
+                break;
+              case NT_APOPLAST:
+                {
+                  dc[AAUX] += T_in1 * m_AUX * nn->c[AUXIN] - T_in2 * n->c[AAUX];
+                  dc[VAF] += k_b * nn->c[VAF];
+                }
+                break;
+              case NT_MEMBRANE:
+                {
+                  // interface length between two neighbor membrane elements
+                  double L_m_m = S.edge(n, nn)->length;  
+                  dc[PIN] += L_m_m/S_m * (d_PIN * (nn->c[PIN] - n->c[PIN]));
+                }
+                break;
+            }
+          }
+          vvassert(nu_apin >= 0);
+          dc[APIN] -= nu_apin * n->c[APIN] * n->c[AAUX];
+          dc[PIN] += nu_apin * n->c[APIN] * n->c[AAUX];
+          if(is_sink) {
+            dc[PIN] = 0;
+            dc[APIN] = 0;
+          }
+        }
+        break;
+    }
+    n->dc = dc;
+  }
+
+  /*
+  void updateDerivatives(const node& n, const rd_tag_t&)
+  {
+    Point4d dc = Point4d(0, 0, 0, 0);
+    switch(n->type) {
+      case NT_CELL:
+        {
+          bool is_sink = false;
+          double V_c = n->size;   // cell volume
+          double nu_apin = nu_apin_low + (nu_apin_high - nu_apin_low) * sigmoid(n->c[AUXIN] - a_th, nu_apin_slope);
+          switch(static_cast<CellLink*>(n->link)->cel->type) {
+            case CORPUS:
+              dc[AUXIN] += sigma_a - mu_a * n->c[AUXIN];
+              break;
+            case SOURCE:
+              dc[AUXIN] += sigma_a_source - mu_a * n->c[AUXIN];
+              break;
+            case L1:
+              dc[AUXIN] += sigma_a_L1 - mu_a * n->c[AUXIN];
+              break;
+            case SINK:
+              dc[AUXIN] += sigma_a - mu_a_sink * n->c[AUXIN];
+              is_sink = true;
+              break;
+          }
+          forall const node& nn in S.neighbors(n): {
+            switch(nn->type) {
+              case NT_APOPLAST:
+                vvassert_msg(false, "Link between cell and apoplast!");
+                break;
+              case NT_MEMBRANE:
+                {
+                  vvassert(nu_apin >= 0);
+                  double S_m = nn->size;   // membrane area
+                  dc[AUXIN] += S_m/V_c * (nu_apin * nn->c[APIN] * nn->c[AAUX]
+                                          + T_in2 * nn->c[AAUX]
+                                          - T_out1 * n->c[AUXIN] * nn->c[PIN]);
+                  //dc[AUXIN] -= S_m * T_out1 * n->c[AUXIN] * nn->c[PIN];
+                  dc[PIN] -= S_m/V_c * (sigma_p
+                                        + sigma_apin * nn->c[APIN] * nn->c[APIN]
+                                        + sigma_aaux * nn->c[AAUX] * nn->c[AAUX]
+                                       ) * n->c[PIN] / (1 + kappa_p_m * nn->c[PIN]);
+                  //if (nn->c[PIN] > PIN_0)
+                  dc[PIN] += S_m/V_c * mu_p * nn->c[PIN];
+                }
+                break;
+              case NT_CELL:
+                vvassert_msg(false, "Link between cells!");
+                break;
+            }
+          }
+          if(is_sink)
+            dc[PIN] = 0;
+        }
+        break;
+      case NT_APOPLAST:
+        {
+          double V_a = n->size;   // apoplast volume
+          forall const node& nn in S.neighbors(n): {
+            switch(nn->type) {
+              case NT_APOPLAST:
+                {
+                  double S_aa = S.edge(n, nn)->area;
+                  dc[AUXIN] += S_aa/V_a * (d_a * (nn->c[AUXIN] - n->c[AUXIN]));
+                }
+                break;
+              case NT_MEMBRANE:
+                {
+                  double S_m = nn->size;   // membrane area
+                  dc[AUXIN] += S_m/V_a * (T_out2 * nn->c[APIN]
+                                          - T_in1 * n->c[AUXIN] * AUX);
+                }
+                break;
+              case NT_CELL:
+                vvassert_msg(false, "Link between cell and apoplast!");
+                break;
+            }
+          }
+        }
+        break;
+      case NT_MEMBRANE:
+        {
+          vvassert(S.valence(n) == 2);
+          bool is_sink = false;
+          double nu_apin = -1;
+          //if (n->c[PIN] > PIN_0)
+          dc[PIN] -= mu_p * n->c[PIN];
+          dc[PIN] += T_out2 * n->c[APIN];
+          dc[APIN] -= T_out2 * n->c[APIN];
+          forall const node& nn in S.neighbors(n): {
+            switch(nn->type)
+            {
+              case NT_CELL:
+                {
+                  is_sink = static_cast<CellLink*>(nn->link)->cel->type == SINK;
+                  dc[PIN] += (sigma_p
+                              + sigma_apin * n->c[APIN] * n->c[APIN]
+                              + sigma_aaux * n->c[AAUX] * n->c[AAUX]
+                             ) * nn->c[PIN] / (1 + kappa_p_m * n->c[PIN]);
+                  dc[PIN] -= T_out1 * n->c[PIN] * nn->c[AUXIN];
+                  dc[APIN] += T_out1 * n->c[PIN] * nn->c[AUXIN];
+                  nu_apin = nu_apin_low + (nu_apin_high - nu_apin_low) * sigmoid(nn->c[AUXIN] - a_th, nu_apin_slope);
+                }
+                break;
+              case NT_APOPLAST:
+                {
+                  dc[AAUX] += T_in1 * AUX * nn->c[AUXIN] - T_in2 * n->c[AAUX];
+                }
+                break;
+              case NT_MEMBRANE:
+                break;
+            }
+          }
+          vvassert(nu_apin == nu_apin);
+          dc[APIN] -= nu_apin * n->c[APIN] * n->c[AAUX];
+          dc[PIN] += nu_apin * n->c[APIN] * n->c[AAUX];
+          if(is_sink) {
+            dc[PIN] = 0;
+            dc[APIN] = 0;
+          }
+        }
+        break;
+    }
+    n->dc = dc;
+  }
+  */
+
+  // Methods for the solver
+  
+  /**
+   * Return the vector containing the values at a cell
+   */
+  Point5d& values(const node& n, const rd_tag_t& ) const
+  { return n->c; }
+
+  /**
+   * Return the vector containing the time derivatives at a cell
+   */
+  Point5d& derivatives(const node& n, const rd_tag_t& ) const
+  { return n->dc; }
+
+  RDSolver::VertexInternals& vertexInternals(const node& n, const rd_tag_t&) const
+  {
+    return n->interns;
+  }
+
+  /**
+   * Return the edge-internals needed by the algorithms
+   */
+  RDSolver::EdgeInternals& edgeInternals(const node& src, const node& tgt, SolverGraph& S, const rd_tag_t&) const
+  {
+    return S.edge(src, tgt)->interns;
+  }
+
+  template <int N1, int N2>
+  void _showLinkedInfo2(const Tissue::ncell_t<N2>& c, const true_type&)
+  {
+    out << D.nbCobounds<N1>(c) << " " << N1 << "-cobounds: " << D.cobounds<N1>(c) << endl;
+  }
+
+  template <int N1, int N2>
+  void _showLinkedInfo2(const Tissue::ncell_t<N2>& c, const false_type&)
+  {
+    out << D.nbBounds<N1>(c) << " " << N1 << "-bounds: " << D.bounds<N1>(c) << endl;
+  }
+
+  template <int N1, int N2>
+  void _showLinkedInfo(const Tissue::ncell_t<N2>& c, const true_type&)
+  {
+    out << D.nbNeighbors(c) << " neighbors: " << D.neighbors(c) << endl;
+  }
+
+  /*
+  template <int N1, int N2>
+  void _showLinkedInfo(const Tissue::ncell_t<N2>& c, const false_type&)
+  {
+    _showLinkedInfo2<N1>(c, typename test_type<(N1>N2)>::type());
+  }
+
+  template <int N1, int N2>
+  void showLinkedInfo(const Tissue::ncell_t<N2>& c)
+  {
+    _showLinkedInfo<N1>(c, typename test_type<(N1==N2)>::type());
+  }
+
+  template <int N1>
+  void showCellInfo(const Tissue::ncell_t<N1>& c)
+  {
+    out << "Information on cell: " << c << endl;
+    showLinkedInfo<3>(c);
+    showLinkedInfo<2>(c);
+    showLinkedInfo<1>(c);
+    showLinkedInfo<0>(c);
+  }
+  */
+
+// Methods used by ComplexDrawer
+
+int cellIndex(const cell& c) const
+{
+  return 4;
+}
+
+double area(const face& f) const
+{
+  return f->area;
+}
+
+Point3d normal(const face& f) const
+{
+  return f->normal;
+}
+
+Point3d position(const cell& c) const
+{
+  return c->pos;
+}
+
+Point3d position(const face& f) const
+{
+  return f->pos;
+}
+
+Point3d position(const ccvertex& v) const
+{
+  return v->pos;
+}
+
+// Is the edge a crease (e.g. a visible line on the surface)
+bool crease(const edge& e) const
+{
+  return true;
+}
+
+void print()
+{
+  if (desc_vars.PIN_L1_toward_L2 > 200) {
+    out << "PIN toward L2." << endl;
+    stop();
+  } else if (time > (maxTime - 20) and (desc_vars.nb_cv_cells == 0)) {
+    out << "No CV cells." << endl;
+    stop();
+  } else if (time > maxTime) {
+    out << "Time limit reached." << endl;
+    stop();
+  }
+}
+
+void finalizePrint()
+{
+  saveSnapshot("final.xml");
+  QFile file("output.ini");
+  if(not file.open(QIODevice::WriteOnly)) {
+    out << "Error, cannot open file '" << file.fileName() << "' for writing" << endl;
+    return;
+  }
+
+  std::vector<ConvergenceCellL1> cv_cells_L1 = search_convergence_cells(V);
+  DescVariables vars = computeDescVariables(V, cv_cells_L1);
+
+  int nb_digits = std::numeric_limits<double>::max_digits10;
+
+  QTextStream ts(&file);
+  ts.setRealNumberPrecision(nb_digits);
+
+  ts << "[Results]" << endl;
+
+  ts << "MeanAuxin = " << vars.mean_auxin << endl;
+
+  size_t cv_cell_idx = 0;
+  for (const ConvergenceCellL1& cv_cell: cv_cells_L1)
+  {
+    Point3d pos = cv_cell.position;
+    double x = pos.x();
+    double y = pos.y();
+    size_t R = gridSize.x();
+    double r = std::sqrt(x*x + y*y);
+    double cv_factor = cv_cell.cv_factor;
+    double normalised_auxin = cv_cell.auxin / vars.mean_auxin;
+    //if (nb_cv_cells < max_cv_cells
+    if (cv_factor > min_cv_factor and normalised_auxin > 1 and r < (R - 1.)) {
+      cv_cell_idx++;
+      // Cell n = x y normalised_auxin_conc cv_factor
+      ts << "Cell" << cv_cell_idx << " = " << x << " " << y << " " 
+        << normalised_auxin << " " << cv_factor << endl;
+    }
+  }
+  ts << "NbCvCells = " << vars.nb_cv_cells << endl;
+  /*
+  while (nb_cv_cells < max_cv_cells) {
+    nb_cv_cells++;
+    ts << "Cell" << nb_cv_cells - 1 << " = " << "-" << endl;
+  }
+  */
+
+  ts << "Stability = " << vars.max_dPIN_membrane << endl;
+}
+
+public slots:
+
+/*
+  void flushCSV()
+  {
+    csvDescVariables.flush();
+    csvMaxdPINVariables.flush();
+  }
+  */
+
+}
+
+Viewer:
+{
+init:
+  {
+    setOpenGLVersion(OPENGL32_GEOMETRY);
+  }
+
+}

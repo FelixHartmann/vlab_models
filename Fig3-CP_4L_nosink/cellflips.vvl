@@ -1,0 +1,32 @@
+// -*- c++ -*-
+#include "cellflips.h"
+#include "cellflipsinvariant.h"
+
+namespace ndcomplex
+{
+
+QTextStream& operator<<(QTextStream& ss, const InvariantReport::Cell& c)
+{
+  ss << "[" << c.dim << "|" << c.num << "]";
+  return ss;
+}
+
+QTextStream& operator<<(QTextStream& ss, const InvariantReport::Error& err)
+{
+  ss << InvariantReport::invariantToText(err.inv) << ":";
+  forall const InvariantReport::Cell& c in err.cells:
+  {
+    ss << " " << c;
+  }
+  return ss;
+}
+
+QTextStream& operator<<(QTextStream& ss, const InvariantReport& report)
+{
+  ss << "There are " << report.errors.size() << " violations of the invariants:" << endl;
+  forall const InvariantReport::Error& err in report.errors:
+      ss << err << endl;
+  return ss;
+}
+
+}

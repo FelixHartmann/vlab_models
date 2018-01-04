@@ -1,0 +1,747 @@
+#include "drawer_base.h"
+
+#include <QTextStream>
+#include <stdlib.h>
+#include <viewer.h>
+
+static QTextStream out(stdout);
+
+GenCell::GenCell(QMutex *m, QObject *parent)
+  : Drawable(parent)
+  , _mutex(m)
+  , trans(0)
+  , palTexId(0)
+{
+  setCanDrag(false);
+  setCanMove(false);
+}
+
+void GenCell::init(Viewer *, Shader *t, Shader * )
+{
+  trans = t;
+}
+
+QMutex* GenCell::mutex()
+{
+  return _mutex;
+}
+
+void GenCell::setPalTexId(GLuint id)
+{
+  palTexId = id;
+}
+
+float Vertices::pointSize = 6;
+
+Vertices::Vertices(QMutex *m, QObject *parent)
+  : GenCell(m, parent)
+  , color(1,1,1,1)
+{
+  this->setObjectName("Vertices");
+}
+
+void Vertices::drawWithColors(Viewer *)
+{
+  //forall const Colorub& c in vid:
+    //out << c << endl;
+  glColor3f(1,1,1);
+  glPointSize(2*pointSize);
+
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+
+  glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Colorub), &vid.front());
+  glVertexPointer(3, GL_DOUBLE, 0, &pts.front());
+
+  glDrawArrays(GL_POINTS, 0, pts.size());
+
+  glDisableClientState(GL_COLOR_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+void Vertices::postSelection(const QPoint&, Viewer *v)
+{
+  size_t id = nameToNum(v->selectedName());
+  out << "Selected vertex: [0|" << id << ']' << endl;
+  emit selectVertex(id);
+}
+
+void Vertices::drawOpaque(Viewer *)
+{
+  QMutexLocker lock(this->mutex());
+
+  //glDisable(GL_LIGHTING);
+  //drawWithColors(0);
+  //glEnable(GL_LIGHTING);
+  //return;
+
+  glDisable(GL_LIGHTING);
+  glPointSize(pointSize);
+  glColor3fv(color.c_data());
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(3, GL_DOUBLE, 0, &pts.front());
+  glDrawArrays(GL_POINTS, 0, pts.size());
+
+  /*
+   *    if(showNormals)
+   *    {
+   *      opaque->useShaders();
+   *
+   *      opaque->setUniform_instant("normalSize", drawing::GLSLValue(normalSize));
+   *      GLuint loc = opaque->attribLocation("vnormal");
+   *      glEnableVertexAttribArray(loc);
+   *
+   *      glLineWidth(normalThickness);
+   *      glVertexAttribPointer(loc, 3, GL_DOUBLE, GL_FALSE, 0, &normals.front());
+   *      glVertexPointer(3, GL_DOUBLE, 0, &starts.front());
+   *      glDrawArrays(GL_LINES, 0, normals.size());
+   *
+   *      glDisableVertexAttribArray(loc);
+   *      opaque->stopUsingShaders();
+   *    }
+   */
+
+  glDisableClientState(GL_VERTEX_ARRAY);
+
+  REPORT_GL_ERROR("Vertex::drawOpaque()");
+}
+
+void Vertices::init(Viewer *, Shader *, Shader *def)
+{
+  opaque = new Shader(*def);
+  opaque->setUniform("peeling", drawing::GLSLValue(false));
+  opaque->changeVertexShaderCode(Drawable::VS_POSITION,
+                                 QString("attribute vec3 vnormal;\n"
+                                         "uniform float normalSize;\n"
+                                         "vec4 position()\n"
+                                         "{\n"
+                                         "  if(gl_Vertex.w == 0) return gl_Vertex;\n"
+                                         "  else {\n"
+                                         "    vec3 pos = gl_Vertex.xyz/gl_Vertex.w + normalSize*vnormal;\n"
+                                         "    return vec4(pos,1.0);\n"
+                                         "  }\n"
+                                         "}\n")
+                                );
+  opaque->changeFragmentShaderCode(Drawable::FS_COLOR,
+                                   QString("void color()\n"
+                                           "{\n"
+                                           "  if(gl_Color.a == 0) discard;\n"
+                                           "  else gl_FragColor = gl_Color;\n"
+                                           "}\n")
+                                  );
+  opaque->setupShaders();
+}
+
+QWidget *Vertices::controls()
+{
+  QUiLoader l;
+  QFile f("vertices.ui");
+  if(!f.open(QIODevice::ReadOnly))
+  {
+    out << "Error opening vertices.ui" << endl;
+    return 0;
+  }
+  QWidget *w = l.load(&f);
+  QDoubleSpinBox *ps = w->findChild<QDoubleSpinBox*>("pointSize");
+  if(!ps)
+  {
+    out << "Error, cannot find double spin box 'pointSize'" << endl;
+    delete w;
+    return 0;
+  }
+  GLfloat psr[2];
+  glGetFloatv(GL_POINT_SIZE_RANGE, psr);
+  ps->setMinimum(psr[0]);
+  ps->setMaximum(psr[1]);
+  ps->setSingleStep(1.0);
+
+  ps->setValue(pointSize);
+
+  connect(ps, SIGNAL(valueChanged(double)), this, SLOT(changePointSize(double)));
+
+  return w;
+}
+
+void Vertices::changePointSize(double v)
+{
+  pointSize = float(v);
+  this->redraw();
+}
+
+float Edges::lineWidth = 2;
+
+Edges::Edges(QMutex *m, QObject *parent)
+  : GenCell(m, parent)
+  , opaque(0)
+{
+  this->setObjectName("Edges");
+}
+
+void Edges::drawWithColors(Viewer *)
+{
+  glLineWidth(2*lineWidth);
+
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+
+  glColorPointer(4, GL_UNSIGNED_BYTE, 0, &edge_ids.front());
+  glVertexPointer(3, GL_DOUBLE, 0, &lines.front());
+
+  glDrawArrays(GL_LINES, 0, lines.size());
+
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glDisableClientState(GL_COLOR_ARRAY);
+}
+
+void Edges::postSelection(const QPoint&, Viewer *v)
+{
+  size_t id = nameToNum(v->selectedName());
+  out << "Selected edge: [1|" << id << "]" << endl;
+  emit selectEdge(id);
+}
+
+void Edges::init(Viewer *, Shader *, Shader *)
+{
+  opaque = new Shader();
+
+  opaque->addVertexShaderCode(QString(//"attribute vec3 center;\n"
+                                      "void main()\n"
+                                      "{\n"
+                                      "  gl_Position = gl_ProjectionMatrix * gl_ModelViewMatrix * gl_Vertex;\n"
+                                      "  gl_ClipVertex = gl_ModelViewMatrix * gl_Vertex;\n"//vec4(center,1);\n"
+                                      "  gl_FrontColor = gl_Color;\n"
+                                      "}\n"));
+
+  opaque->addFragmentShaderCode(QString("void main()\n"
+                                        "{\n"
+                                        "  gl_FragColor = gl_Color;\n"
+                                        "}\n"));
+  opaque->setupShaders();
+}
+
+void Edges::finalize(Viewer *)
+{
+  opaque->cleanShaders();
+  delete opaque;
+  opaque = 0;
+}
+
+void Edges::drawOpaque(Viewer *)
+{
+  QMutexLocker lock(this->mutex());
+  //out << "Edges::drawOpaque()" << endl;
+
+  //glDisable(GL_LIGHTING);
+  //drawWithColors(0);
+  //glEnable(GL_LIGHTING);
+  //return;
+
+  opaque->useShaders();
+
+  //GLuint loc = opaque->attribLocation("center");
+
+  glDisable(GL_LIGHTING);
+  glLineWidth(lineWidth);
+  glColor3fv(color.c_data());
+
+  //glEnableVertexAttribArray(loc);
+  glEnableClientState(GL_VERTEX_ARRAY);
+
+  //glVertexAttribPointer(loc, 3, GL_DOUBLE, GL_FALSE, 0, &centers.front());
+  glVertexPointer(3, GL_DOUBLE, 0, &lines.front());
+
+  glDrawArrays(GL_LINES, 0, lines.size());
+
+  glDisableClientState(GL_VERTEX_ARRAY);
+  //glDisableVertexAttribArray(loc);
+
+  opaque->stopUsingShaders();
+
+  REPORT_GL_ERROR("Edges::drawOpaque()");
+}
+
+QWidget *Edges::controls()
+{
+  QUiLoader l;
+  QFile f("edges.ui");
+  if(!f.open(QIODevice::ReadOnly))
+  {
+    out << "Error opening faces.ui" << endl;
+    return 0;
+  }
+  QWidget *w = l.load(&f);
+  QDoubleSpinBox *lt = w->findChild<QDoubleSpinBox*>("lineThickness");
+  if(!lt)
+  {
+    out << "Error, cannot find double spin box 'lineThickness'" << endl;
+    delete w;
+    return 0;
+  }
+  GLfloat lwr[2];
+  glGetFloatv(GL_LINE_WIDTH_RANGE, lwr);
+  lt->setMinimum(lwr[0]);
+  lt->setMaximum(lwr[1]);
+  lt->setSingleStep(1.0);
+
+  lt->setValue(lineWidth);
+
+  connect(lt, SIGNAL(valueChanged(double)), this, SLOT(changeLineWidth(double)));
+
+  return w;
+}
+
+void Edges::changeLineWidth(double v)
+{
+  lineWidth = float(v);
+  redraw();
+}
+
+Faces::Faces(QMutex *m, QObject *parent)
+  : GenCell(m, parent)
+  , normalThickness(1)
+  , faceTransparency(0.7)
+  , showNormals(false)
+  , opaque(0)
+{
+  this->setObjectName("Faces");
+  this->setVisible(false);
+}
+
+void Faces::init(Viewer *, Shader *t, Shader *def)
+{
+  trans = new Shader(*t);
+  opaque = new Shader(*def);
+  opaque->setUniform("peeling", drawing::GLSLValue(false));
+  opaque->changeVertexShaderCode(Drawable::VS_POSITION,
+                                 QString("attribute vec3 vnormal;\n"
+                                         "uniform float normalSize;\n"
+                                         "vec4 position()\n"
+                                         "{\n"
+                                         "  if(gl_Vertex.w == 0) return gl_Vertex;\n"
+                                         "  else {\n"
+                                         "    vec3 pos = gl_Vertex.xyz/gl_Vertex.w + normalSize*vnormal;\n"
+                                         "    return vec4(pos,1.0);\n"
+                                         "  }\n"
+                                         "}\n")
+                                );
+
+  opaque->changeFragmentShaderCode(Drawable::FS_COLOR,
+                                   QString("void color()\n"
+                                           "{\n"
+                                           "  if(gl_Color.a == 0) discard;\n"
+                                           "  else gl_FragColor = gl_Color;\n"
+                                           "}\n")
+                                  );
+  opaque->setupShaders();
+
+  trans->changeVertexShaderCode(Drawable::VS_CLIPPING,
+                                QString(//"attribute vec3 center;\n"
+                                        "void clipVertex(vec4 pos)\n"
+                                        "{\n"
+                                        "  gl_ClipVertex = gl_ModelViewMatrix*pos;\n"//vec4(center,1);\n"
+                                        "}\n"));
+
+  trans->setupShaders();
+}
+
+void Faces::finalize(Viewer *)
+{
+  opaque->cleanShaders();
+  delete opaque;
+  opaque = 0;
+  trans->cleanShaders();
+  delete trans;
+  trans = 0;
+}
+
+void Faces::drawWithColors(Viewer *)
+{
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+
+  glColorPointer(4, GL_UNSIGNED_BYTE, 0, &face_id.front());
+  glVertexPointer(3, GL_DOUBLE, 0, &faces.front());
+
+  glDrawArrays(GL_TRIANGLES, 0, faces.size());
+
+  glDisableClientState(GL_COLOR_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+void Faces::postSelection(const QPoint& , Viewer *v)
+{
+  size_t id = nameToNum(v->selectedName());
+  out << "Selected face: [2|" << id << "]" << endl;
+  emit selectFace(id);
+}
+
+void Faces::drawOpaque(Viewer *v)
+{
+  if(showNormals)
+  {
+    opaque->useShaders();
+    opaque->setUniform_instant("normalSize", drawing::GLSLValue(normalSize));
+    GLuint loc = opaque->attribLocation("vnormal");
+
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableVertexAttribArray(loc);
+
+    glColor3fv(normalColor.c_data());
+
+    glVertexAttribPointer(loc, 3, GL_DOUBLE, GL_FALSE, 0, &faces_normals.front());
+    glLineWidth(normalThickness);
+    glVertexPointer(3, GL_DOUBLE, 0, &center_faces.front());
+    glDrawArrays(GL_LINES, 0, center_faces.size());
+
+    glDisableVertexAttribArray(loc);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    opaque->stopUsingShaders();
+  }
+}
+
+void Faces::drawTransparent(Viewer *v)
+{
+  QMutexLocker lock(this->mutex());
+  //out << "Faces::drawOpaque() with " << this->data->faces.size() << " elements" << endl;
+  this->trans->setUniform("two_sided_light", drawing::GLSLValue(true));
+  this->trans->setUniform("nbLights", drawing::GLSLValue(v->nbLights()));
+  this->trans->useShaders();
+  this->trans->setUniform_instant("transparency", drawing::GLSLValue(faceTransparency));
+  glColor3f(1,1,1);
+
+  GLuint loc_color = this->trans->attribLocation("vertexColor");
+  //GLuint loc_center = this->trans->attribLocation("center");
+  glEnableVertexAttribArray(loc_color);
+  //glEnableVertexAttribArray(loc_center);
+
+  Shader::activeTexture(AT_PALETTE);
+  glBindTexture(GL_TEXTURE_1D, this->palTexId);
+  Shader::activeTexture(AT_NONE);
+  glBindTexture(GL_TEXTURE_1D, 0);
+
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_NORMAL_ARRAY);
+
+  glVertexAttribPointer(loc_color, 1, GL_FLOAT, GL_FALSE, 0, &colors.front());
+  //glVertexAttribPointer(loc_center, 3, GL_DOUBLE, GL_FALSE, 0, &faces_center.front());
+  glNormalPointer(GL_DOUBLE, 0, &normals.front());
+  glVertexPointer(3, GL_DOUBLE, 0, &faces.front());
+
+  glDrawArrays(GL_TRIANGLES, 0, faces.size());
+
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glDisableClientState(GL_NORMAL_ARRAY);
+  glDisableVertexAttribArray(loc_color);
+  //glDisableVertexAttribArray(loc_center);
+
+  Shader::activeTexture(AT_PALETTE);
+  glBindTexture(GL_TEXTURE_1D, 0);
+  Shader::activeTexture(AT_NONE);
+
+  this->trans->stopUsingShaders();
+
+  this->trans->setUniform("two_sided_light", drawing::GLSLValue(false));
+  REPORT_GL_ERROR("Faces::drawTransparent()");
+}
+
+QWidget *Faces::controls()
+{
+  QUiLoader l;
+  QFile f("faces.ui");
+  if(!f.open(QIODevice::ReadOnly))
+  {
+    out << "Error opening faces.ui" << endl;
+    return 0;
+  }
+  QWidget *w = l.load(&f);
+  QSpinBox *tr = w->findChild<QSpinBox*>("transparencyFace");
+  if(!tr)
+  {
+    out << "Error, cannot find spin box 'transparencyFace'" << endl;
+    delete w;
+    return 0;
+  }
+  QDoubleSpinBox *nt = w->findChild<QDoubleSpinBox*>("normalThickness");
+  if(!nt)
+  {
+    out << "Error, cannot find double spin box 'normalThickness'" << endl;
+    delete w;
+    return 0;
+  }
+  QDoubleSpinBox *ns = w->findChild<QDoubleSpinBox*>("normalSize");
+  if(!ns)
+  {
+    out << "Error, cannot find double spin box 'normalSize'" << endl;
+    delete w;
+    return 0;
+  }
+  QGroupBox *sn = w->findChild<QGroupBox*>("showNormals");
+  if(!sn)
+  {
+    out << "Error, cannot find group box 'showNormals'" << endl;
+    delete w;
+    return 0;
+  }
+  GLfloat lw[2];
+  glGetFloatv(GL_LINE_WIDTH_RANGE, lw);
+  nt->setMinimum(lw[0]);
+  nt->setMaximum(lw[1]);
+  nt->setSingleStep(1.0);
+
+  ns->setValue(normalSize);
+  nt->setValue(normalThickness);
+  tr->setValue(int(100*faceTransparency));
+
+  sn->setChecked(showNormals);
+
+  connect(tr, SIGNAL(valueChanged(int)), this, SLOT(changeTransparency(int)));
+  connect(nt, SIGNAL(valueChanged(double)), this, SLOT(changeThickness(double)));
+  connect(ns, SIGNAL(valueChanged(double)), this, SLOT(changeNormalSize(double)));
+  connect(sn, SIGNAL(toggled(bool)), this, SLOT(changeShowNormal(bool)));
+
+  return w;
+}
+
+
+void Faces::changeNormalSize(double v)
+{
+  normalSize = float(v);
+  this->redraw();
+}
+
+void Faces::changeThickness(double v)
+{
+  normalThickness = float(v);
+  this->redraw();
+}
+
+void Faces::changeTransparency(int t)
+{
+  faceTransparency = float(t)/100;
+  this->redraw();
+}
+
+void Faces::changeShowNormal(bool on)
+{
+  showNormals = on;
+  this->redraw();
+}
+
+double Cells::centerRadius = .1;
+
+Cells::Cells(QMutex *m, QObject *parent)
+  : GenCell(m, parent)
+  , cellTransparency(0.7)
+  , showCenter(true)
+{
+  this->setObjectName("Cells");
+}
+
+void Cells::init(Viewer *, Shader *t, Shader *def)
+{
+  trans = new Shader(*t);
+  trans->changeVertexShaderCode(Drawable::VS_POSITION,
+                                QString("attribute vec3 center;\n"
+                                        "uniform float cellShift;\n"
+                                        "vec4 position() {\n"
+                                        "  if(gl_Vertex.w == 0) return gl_Vertex;\n"
+                                        "  else {\n"
+                                        "    vec3 pos = gl_Vertex.xyz / gl_Vertex.w;\n"
+                                        "    pos = cellShift*center + (1-cellShift)*pos;\n"
+                                        "    return vec4(pos,1.0);\n"
+                                        "  }\n"
+                                        "}\n")
+                               );
+  trans->changeVertexShaderCode(Drawable::VS_CLIPPING,
+                                QString("void clipVertex(vec4 pos)\n"
+                                        "{\n"
+                                        "  gl_ClipVertex = gl_ModelViewMatrix*vec4(center,1);\n"
+                                        "}\n"));
+  trans->setupShaders();
+  trans->setUniform("palette", drawing::GLSLValue(AT_PALETTE));
+
+  opaque = new Shader(*def);
+  opaque->changeVertexShaderCode(Drawable::VS_CLIPPING,
+                                 QString("void clipVertex(vec4 pos)\n"
+                                         "{\n"
+                                         "  gl_ClipVertex = gl_ModelViewMatrix*vec4(0,0,0,1);\n"
+                                         "}\n"));
+  opaque->setupShaders();
+  opaque->setUniform("peeling", drawing::GLSLValue(false));
+}
+
+void Cells::finalize(Viewer *)
+{
+  if(trans) {
+    trans->cleanShaders();
+    delete trans;
+    trans = 0;
+  }
+  if(opaque) {
+    opaque->cleanShaders();
+    delete opaque;
+    opaque = 0;
+  }
+}
+
+void Cells::drawWithColors(Viewer *)
+{
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+
+  glColorPointer(4, GL_UNSIGNED_BYTE, 0, &cell_id.front());
+  glVertexPointer(3, GL_DOUBLE, 0, &cells.front());
+
+  glDrawArrays(GL_TRIANGLES, 0, cells.size());
+
+  glDisableClientState(GL_COLOR_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+void Cells::postSelection(const QPoint&, Viewer *v)
+{
+  size_t id = nameToNum(v->selectedName());
+  out << "Selected cell: [3|" << id << ']' << endl;
+  emit selectCell(id);
+}
+
+void Cells::drawOpaque(Viewer *v)
+{
+  if(showCenter)
+  {
+    opaque->setUniform("nbLights", drawing::GLSLValue(v->nbLights()));
+    opaque->useShaders();
+    glColor3f(1,0,0);
+    forall const Point3d& cp in cell_centers:
+      shape::sphere(cp, centerRadius, 10, 10);
+    glColor3f(1,1,1);
+    opaque->stopUsingShaders();
+  }
+}
+
+void Cells::drawTransparent(Viewer *v)
+{
+  QMutexLocker lock(this->mutex());
+  //out << "Cells::drawTransparent()" << endl;
+
+  trans->setUniform("nbLights", drawing::GLSLValue(v->nbLights()));
+
+  glColor3f(1,1,1);
+  trans->useShaders();
+  trans->setUniform_instant("transparency", drawing::GLSLValue(cellTransparency));
+  trans->setUniform_instant("cellShift", drawing::GLSLValue(cellShift));
+
+  Shader::activeTexture(AT_PALETTE);
+  glBindTexture(GL_TEXTURE_1D, palTexId);
+  Shader::activeTexture(AT_NONE);
+  glBindTexture(GL_TEXTURE_1D, 0);
+
+  GLuint loc_color = trans->attribLocation("vertexColor");
+  GLuint loc_center = trans->attribLocation("center");
+  if(!loc_color) out << "Error get vertexColor location" << endl;
+  if(!loc_center) out << "Error get center location" << endl;
+
+  glEnableVertexAttribArray(loc_color);
+  glEnableVertexAttribArray(loc_center);
+
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_NORMAL_ARRAY);
+
+  glVertexAttribPointer(loc_center, 3, GL_DOUBLE, GL_FALSE, 0, &centers.front());
+  glVertexAttribPointer(loc_color, 1, GL_FLOAT, GL_FALSE, 0, &colors.front());
+  glVertexPointer(3, GL_DOUBLE, 0, &cells.front());
+  glNormalPointer(GL_DOUBLE, 0, &normals.front());
+
+  glDrawArrays(GL_TRIANGLES, 0, cells.size());
+
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glDisableClientState(GL_NORMAL_ARRAY);
+  glDisableVertexAttribArray(loc_center);
+  glDisableVertexAttribArray(loc_color);
+
+  Shader::activeTexture(AT_PALETTE);
+  glBindTexture(GL_TEXTURE_1D, 0);
+  Shader::activeTexture(AT_NONE);
+
+  this->trans->stopUsingShaders();
+  REPORT_GL_ERROR("Cells::drawTransparent()");
+}
+
+QWidget *Cells::controls()
+{
+  QUiLoader l;
+  QFile f("cells.ui");
+  if(!f.open(QIODevice::ReadOnly))
+  {
+    out << "Error opening cells.ui" << endl;
+    return 0;
+  }
+  QWidget *w = l.load(&f);
+  QSpinBox *tr = w->findChild<QSpinBox*>("transparencyCell");
+  if(!tr)
+  {
+    out << "Error, cannot find spin box 'transparencyCell'" << endl;
+    delete w;
+    return 0;
+  }
+  QSpinBox *cs = w->findChild<QSpinBox*>("cellShift");
+  if(!cs)
+  {
+    out << "Error, cannot find spin box 'cellShift'" << endl;
+    delete w;
+    return 0;
+  }
+  QGroupBox *cc = w->findChild<QGroupBox*>("cellCenter");
+  if(!cc)
+  {
+    out << "Error, cannot find group box 'cellCenter'" << endl;
+    delete w;
+    return 0;
+  }
+  QDoubleSpinBox *cr = w->findChild<QDoubleSpinBox*>("centerRadius");
+  if(!cr)
+  {
+    out << "Error, cannot find spin box 'centerRadius'" << endl;
+    delete w;
+    return 0;
+  }
+
+  tr->setValue(int(100.0*cellTransparency));
+  cs->setValue(int(100.0*(1.0-cellShift)));
+  cr->setValue(centerRadius);
+  cc->setChecked(showCenter);
+
+  connect(tr, SIGNAL(valueChanged(int)), this, SLOT(changeTransparency(int)));
+  connect(cs, SIGNAL(valueChanged(int)), this, SLOT(changeCellShift(int)));
+  connect(cr, SIGNAL(valueChanged(double)), this, SLOT(changeCellRadius(double)));
+  connect(cc, SIGNAL(toggled(bool)), this, SLOT(showCellCenter(bool)));
+
+  return w;
+}
+
+void Cells::changeTransparency(int t)
+{
+  cellTransparency = float(t)/100.0;
+  this->redraw();
+}
+
+void Cells::changeCellShift(int t)
+{
+  cellShift = 1.0-float(t)/100.0;
+  this->redraw();
+}
+
+void Cells::showCellCenter(bool show)
+{
+  showCenter = show;
+  this->redraw();
+}
+
+void Cells::changeCellRadius(double r)
+{
+  centerRadius = r;
+  this->redraw();
+}
+
+#include "drawer_base.moc"
+

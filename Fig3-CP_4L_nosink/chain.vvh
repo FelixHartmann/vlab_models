@@ -1,0 +1,667 @@
+// -*- c++ -*-
+#ifndef CHAIN_VVH
+#define CHAIN_VVH
+
+/**
+ * \file chain.vvh
+ *
+ * This files include the definition of \f$n\f$-chains and cell multi-sets.
+ */
+
+#include "cell.h"
+
+//#include <set>
+#include <unordered_set>
+#include <initializer_list>
+//#include <algorithm>
+
+namespace ndcomplex
+{
+/**
+ * \class Chain
+ * Class represented an oriented multi-set of cells.
+ *
+ * The chain uses a multi-set of oriented cells to make the operation order-independent.
+ */
+template <typename CellType>
+class Chain
+{
+  protected:
+  public:
+    /// Type of a cell
+    typedef CellType cell_t;
+    /// Type of an oriented cell
+    typedef typename cell_t::oriented_cell_t oriented_cell_t;
+    /// Type of the underlying container (currently a multiset)
+    typedef std::unordered_multiset<oriented_cell_t> container_t;
+    ///\name STL Container types
+    //@{
+    /// Type of a value, i.e. an oriented cell
+    typedef typename container_t::value_type value_type;
+    /// Type of a constant iterator
+    typedef typename container_t::const_iterator const_iterator;
+    /// Type of an iterator
+    typedef typename container_t::iterator iterator;
+    /// Type of a size value
+    typedef typename container_t::size_type size_type;
+    /// Type of a reference
+    typedef typename container_t::reference reference;
+    /// Type of a constant reference
+    typedef typename container_t::const_reference const_reference;
+    //@}
+
+    ///\name Constructors
+    //@{
+    /// Default constructor
+    Chain()
+      : _chain()
+    { }
+
+    /// Constructor with an initializer list
+    Chain(const std::initializer_list<oriented_cell_t>& init)
+      : _chain()
+    {
+      forall const oriented_cell_t& oc in init:
+        this->insert(oc);
+    }
+
+    /**
+     * Constructor with an initializer list of non-oriented cell
+     *
+     * This add all the cells, oriented positively
+     */
+    Chain(const std::initializer_list<cell_t>& init)
+      : _chain()
+    {
+      forall const cell_t& oc in init:
+        this->insert(+oc);
+    }
+
+    /**
+     * Default copy constructor
+     */
+    Chain(const Chain&) = default;
+
+    /**
+     * Default move constructor
+     */
+    Chain(Chain&&) = default;
+
+    /**
+     * Initialize from another container
+     */
+    template <typename Container>
+    explicit Chain(const Container& init)
+    : _chain()
+    {
+      forall const auto& oc in init:
+        this->insert(+oc);
+    }
+
+    explicit Chain(const oriented_cell_t& oc)
+      : _chain()
+    {
+      _chain.insert(oc);
+    }
+
+    explicit Chain(const cell_t& oc)
+      : _chain()
+    {
+      _chain.insert(+oc);
+    }
+
+    Chain operator-() const
+    {
+      Chain result;
+      forall const oriented_cell_t& oc in _chain:
+        result.insert(-oc);
+      return result;
+    }
+
+    Chain& reverse()
+    {
+      Chain result;
+      forall const oriented_cell_t& oc in _chain:
+      {
+        result.insert(-oc);
+      }
+      std::swap(*this, result);
+      return *this;
+    }
+
+    /**
+     * Returns true if the cell was inserted, and false if the opposite cell has been removed instead
+     */
+    std::pair<iterator, bool> insert(const oriented_cell_t& oc)
+    {
+      auto found = _chain.find(-oc);
+      if(found == _chain.end())
+      {
+        return {_chain.insert(oc), true};
+      }
+      else
+      {
+        _chain.erase(found);
+        return {_chain.end(), false};
+      }
+    }
+
+    template <typename Iterator>
+    void insert(Iterator first, Iterator last)
+    {
+      for(Iterator it = first ; it != last ; ++it)
+        insert(*it);
+    }
+
+    size_type erase(const cell_t& c)
+    {
+      return _chain.erase(+c) + _chain.erase(-c);
+    }
+
+    size_type erase(const oriented_cell_t& oc)
+    {
+      return _chain.erase(oc);
+    }
+
+    iterator erase(const iterator& oc)
+    {
+      return _chain.erase(oc);
+    }
+
+    Chain& operator=(const Chain&) = default;
+    Chain& operator=(Chain&&) = default;
+
+    bool operator==(const Chain& other) const
+    {
+      return _chain == other._chain;
+    }
+
+    bool operator!=(const Chain& other) const
+    {
+      return _chain != other._chain;
+    }
+
+    Chain operator&(const Chain& other) const
+    {
+      Chain result;
+      /*
+       *std::set_intersection(_chain.begin(), _chain.end(),
+       *                      other._chain.begin(), other._chain.end(),
+       *                      std::inserter(result._chain, result._chain.end()));
+       */
+      forall const oriented_cell_t& oc in other:
+        if(contains(oc))
+          result.insert(oc);
+      return result;
+    }
+
+    Chain& operator&=(const Chain& other)
+    {
+      //*this = (*this) & other;
+      for(iterator it = begin() ; it != end() ; )
+      {
+        if(!other.contains(*it))
+          it = erase(it);
+        else
+          ++it;
+      }
+      return *this;
+    }
+
+    Chain operator|(const Chain& other) const
+    {
+      Chain result(*this);
+      result |= other;
+      /*
+       *auto it1 = _chain.begin();
+       *auto it2 = other._chain.begin();
+       *while(it1 != _chain.end() and it2 != other._chain.end())
+       *{
+       *  if(*it1 == -(*it2))
+       *  {
+       *    ++it1;
+       *    ++it2;
+       *  }
+       *  else
+       *  {
+       *    if(*it1 < *it2)
+       *    {
+       *      result.insert(*it1);
+       *      ++it1;
+       *    }
+       *    else
+       *    {
+       *      result.insert(*it2);
+       *      ++it2;
+       *    }
+       *  }
+       *}
+       *while(it1 != _chain.end())
+       *  result.insert(*it1++);
+       *while(it2 != other._chain.end())
+       *  result.insert(*it2++);
+       */
+      return result;
+    }
+
+    Chain& operator|=(const Chain& other)
+    {
+      //*this = (*this) | other;
+      forall const oriented_cell_t& oc in other:
+      {
+        if(contains(-oc))
+          erase(-oc);
+        else
+          insert(oc);
+      }
+      return *this;
+    }
+
+    const_reference any() const { return *cbegin(); }
+
+    ///\name STL container methods
+    //@{
+    iterator begin() { return _chain.begin(); }
+    iterator end() { return _chain.end(); }
+
+    const_iterator begin() const { return _chain.cbegin(); }
+    const_iterator end() const { return _chain.cend(); }
+
+    const_iterator cbegin() const { return _chain.cbegin(); }
+    const_iterator cend() const { return _chain.cend(); }
+
+    const_iterator find(const_reference oc) const
+    {
+      return _chain.find(oc);
+    }
+
+    iterator find(const_reference oc)
+    {
+      return _chain.find(oc);
+    }
+
+    size_type size() const { return _chain.size(); }
+
+    bool empty() const { return _chain.empty(); }
+
+    void clear()
+    {
+      _chain.clear();
+    }
+    //@}
+
+    ///\name Extended container methods
+    //@{
+
+    bool contains(const_reference oc) const
+    {
+      return _chain.find(oc) != _chain.end();
+    }
+
+    //@}
+
+    ///\name Method with non-oriented cells
+    //@{
+    const_iterator find(const cell_t& c) const
+    {
+      const_iterator found = _chain.find(+c);
+      if(found == _chain.end())
+        return _chain.find(-c);
+      return found;
+    }
+
+    iterator find(const cell_t& c)
+    {
+      iterator found = _chain.find(+c);
+      if(found == _chain.end())
+        return _chain.find(-c);
+      return found;
+    }
+
+    bool contains(const cell_t& c) const
+    {
+      return (_chain.find(+c) != _chain.end() or
+              _chain.find(-c) != _chain.end());
+    }
+    //@}
+
+    ///\name Global operations
+    //@{
+
+    Chain& operator*=(const RelativeOrientation& ro)
+    {
+      container_t new_chain;
+      forall const oriented_cell_t& oc in _chain:
+        new_chain.insert(ro*oc);
+      std::swap(new_chain, _chain);
+      return *this;
+    }
+
+    Chain operator*(const RelativeOrientation& ro) const
+    {
+      Chain result(*this);
+      result *= ro;
+      return result;
+    }
+    //@}
+
+  protected:
+    container_t _chain;
+};
+
+template <typename CellType>
+Chain<CellType> operator*(const RelativeOrientation& ro, const Chain<CellType>& chain)
+{
+  Chain<CellType> result(chain);
+  result *= ro;
+  return result;
+}
+
+template <int dim, typename CellContent>
+Chain<Cell<dim,CellContent> > chain(const Cell<dim,CellContent>& c)
+{
+  return Chain<Cell<dim,CellContent> >(c);
+}
+
+template <int dim, typename CellContent>
+Chain<Cell<dim,CellContent> > chain(const OrientedObject<Cell<dim,CellContent> >& c)
+{
+  return Chain<Cell<dim,CellContent> >(c);
+}
+
+template <typename CellType>
+Chain<CellType> chain(const std::initializer_list<OrientedObject<CellType> >& cont)
+{
+  return Chain<CellType>(cont);
+}
+
+template <typename CellType>
+Chain<CellType> chain(const std::initializer_list<CellType>& cont)
+{
+  return Chain<CellType>(cont);
+}
+
+template <typename Container>
+Chain<typename Container::value_type> chain(const Container& cont)
+{
+  return Chain<typename Container::value_type>(cont);
+}
+
+template <typename CellType>
+class CellSet
+{
+  protected:
+  public:
+    typedef CellType cell_t;
+    typedef std::unordered_set<cell_t> container_t;
+    typedef typename container_t::value_type value_type;
+    typedef typename container_t::const_iterator const_iterator;
+    typedef typename container_t::iterator iterator;
+    typedef typename container_t::size_type size_type;
+    typedef typename container_t::reference reference;
+    typedef typename container_t::const_reference const_reference;
+
+    typedef Chain<cell_t> chain_t;
+
+    CellSet()
+      : _set()
+    { }
+
+    CellSet(const std::initializer_list<cell_t>& init)
+      : _set()
+    {
+      forall const cell_t& oc in init:
+        this->insert(oc);
+    }
+
+    template <typename Container>
+    explicit CellSet(const Container& init)
+    : _set()
+    {
+      forall const auto& oc in init:
+        this->insert(~oc);
+    }
+
+    template <typename Iterator>
+    CellSet(Iterator begin, Iterator end)
+    {
+      for(Iterator it = begin ; it != end ; ++it)
+        this->insert(*it);
+    }
+
+    explicit CellSet(const cell_t& oc)
+      : _set()
+    {
+      _set.insert(oc);
+    }
+
+    /**
+     * Default copy constructor
+     */
+    CellSet(const CellSet&) = default;
+
+    /**
+     * Default move constructor
+     */
+    CellSet(CellSet&&) = default;
+
+    chain_t operator+() const
+    {
+      chain_t result;
+      forall const cell_t& c in _set:
+        result.insert(+c);
+      return result;
+    }
+
+    chain_t operator-() const
+    {
+      chain_t result;
+      forall const cell_t& c in _set:
+        result.insert(-c);
+      return result;
+    }
+
+    chain_t operator*(const RelativeOrientation& ro) const
+    {
+      chain_t result;
+      forall const cell_t& c in _set:
+        result.insert(ro*c);
+      return result;
+    }
+
+    template <typename Iterator>
+    void insert(Iterator first, Iterator last)
+    {
+      for(Iterator it = first ; it != last ; ++it)
+        insert(*it);
+    }
+
+    iterator insert(const iterator& it, const cell_t& c)
+    {
+      return _set.insert(it, c);
+    }
+
+    size_type erase(const cell_t& c)
+    {
+      return _set.erase(c);
+    }
+
+    iterator erase(const iterator& it)
+    {
+      return _set.erase(it);
+    }
+
+    std::pair<iterator, bool> insert(const cell_t& c)
+    {
+      return _set.insert(c);
+    }
+
+    CellSet& operator=(const CellSet&) = default;
+    CellSet& operator=(CellSet&&) = default;
+
+    bool operator==(const CellSet& other) const
+    {
+      return _set == other._set;
+    }
+
+    bool operator!=(const CellSet& other) const
+    {
+      return _set != other._set;
+    }
+
+    CellSet operator&(const CellSet& other) const
+    {
+      CellSet result;
+      /*
+       *std::set_intersection(_set.begin(), _set.end(),
+       *                      other._set.begin(), other._set.end(),
+       *                      std::inserter(result._set, result._set.end()));
+       */
+      forall const cell_t& c in other:
+        if(contains(c))
+          result.insert(c);
+      return result;
+    }
+
+    CellSet& operator&=(const CellSet& other)
+    {
+      //*this = (*this) & other;
+      for(iterator it = begin() ; it != end() ; )
+      {
+        if(!other.contains(*it))
+          it = erase(it);
+        else
+          ++it;
+      }
+      return *this;
+    }
+
+    CellSet operator|(const CellSet& other) const
+    {
+      CellSet result(*this);
+      /*
+       *std::set_union(begin(), end(),
+       *               other.begin(), other.end(),
+       *               std::inserter(result, result.end()));
+       */
+      result.insert(other.begin(), other.end());
+      return result;
+    }
+
+    CellSet& operator|=(const CellSet& other)
+    {
+      //*this = (*this) | other;
+      _set.insert(other.begin(), other.end());
+      return *this;
+    }
+
+    const_reference any() const { return *_set.begin(); }
+
+    iterator begin() { return _set.begin(); }
+    iterator end() { return _set.end(); }
+
+    const_iterator begin() const { return _set.begin(); }
+    const_iterator end() const { return _set.end(); }
+
+    const_iterator cbegin() const { return _set.begin(); }
+    const_iterator cend() const { return _set.end(); }
+
+    size_type size() const { return _set.size(); }
+
+    bool empty() const { return _set.empty(); }
+
+    bool contains(const cell_t& oc) const
+    {
+      return _set.find(oc) != _set.end();
+    }
+
+    const_iterator find(const cell_t& oc) const
+    {
+      return _set.find(oc);
+    }
+
+    iterator find(const cell_t& oc)
+    {
+      return _set.find(oc);
+    }
+
+    void clear()
+    {
+      _set.clear();
+    }
+
+  protected:
+    container_t _set;
+};
+
+template <int dim, typename CellContent>
+CellSet<Cell<dim,CellContent> > cellSet(const Cell<dim,CellContent>& init)
+{
+  return CellSet<Cell<dim,CellContent> >(init);
+}
+
+template <int dim, typename CellContent>
+CellSet<Cell<dim, CellContent> > cellSet(const std::initializer_list<Cell<dim,CellContent> >& init)
+{
+  return CellSet<Cell<dim, CellContent> >(init);
+}
+
+template <typename Container>
+CellSet<typename Container::value_type> cellSet(const Container& init)
+{
+  return CellSet<typename Container::value_type>(init);
+}
+
+template <typename CellType>
+Chain<CellType> operator*(const RelativeOrientation& ro, const CellSet<CellType>& set)
+{
+  return set*ro;
+}
+
+template <typename CellType>
+CellSet<CellType> operator~(const Chain<CellType>& chain)
+{
+  CellSet<CellType> result;
+  forall const typename CellType::oriented_cell_t& oc in chain:
+    result.insert(~oc);
+  return result;
+}
+
+template <typename CellType>
+QTextStream& operator<<(QTextStream& ts, const CellSet<CellType>& b)
+{
+  ts << QString("{%1|").arg(CellType::N);
+  bool first = true;
+  forall const CellType& oc in b:
+  {
+    if(first)
+      first = false;
+    else
+      ts << " ";
+    ts << shortString(oc);
+  }
+  ts << "}";
+  return ts;
+}
+
+template <typename CellType>
+QTextStream& operator<<(QTextStream& ts, const Chain<CellType>& b)
+{
+  ts << QString("{%1|").arg(CellType::N);
+  bool first = true;
+  forall const typename CellType::oriented_cell_t& oc in b:
+  {
+    if(first)
+      first = false;
+    else
+      ts << " ";
+    ts << shortString(oc);
+  }
+  ts << "}";
+  return ts;
+}
+
+}
+
+#endif // CHAIN_VVH
+

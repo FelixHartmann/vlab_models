@@ -1,0 +1,236 @@
+#ifndef CELLFLIPS_UTILS_VVH
+#define CELLFLIPS_UTILS_VVH
+
+#include <type_traits>
+#include <utility>
+#include <util/static_assert.h>
+
+#include "cell.h"
+
+namespace ndcomplex
+{
+
+  using std::true_type;
+  using std::false_type;
+
+  /**
+   * \ingroup utility
+   * \class test_type
+   * Class used to test a condition at compile time
+   */
+  template <bool v>
+  struct test_type
+  {
+    typedef std::integral_constant<bool,v> type;
+  };
+
+  /**
+   * \ingroup utility
+   * \class one_type
+   * type result of a value of 1
+   */
+  struct one_type { };
+  /**
+   * \ingroup utility
+   * \class two_type
+   * type result of a value of 2
+   */
+  struct two_type { };
+  /**
+   * \ingroup utility
+   * \class many_type
+   * type result of a value of many
+   */
+  struct many_type { };
+
+  /**
+   * \ingroup utility
+   * \class one_two_many
+   * Class used to find if a number is 1, 2 and many
+   * The result type is of one_type, two_type or many_type
+   */
+  template <int n>
+  struct one_two_many
+  {
+    typedef many_type type;
+  };
+
+  template <>
+  struct one_two_many<1>
+  {
+    typedef one_type type;
+  };
+
+  template <>
+  struct one_two_many<2>
+  {
+    typedef two_type type;
+  };
+
+  /**
+   * \ingroup utility
+   * \class is_oriented_type
+   * Class testing if the type as argument is oriented or not
+   */
+  template <typename T>
+  struct is_oriented_type
+  {
+    typedef false_type type;
+  };
+
+  template <typename T>
+  struct is_oriented_type<OrientedObject<T> >
+  {
+    typedef true_type type;
+  };
+
+  /**
+   * \ingroup internal
+   * \class void_layer_types
+   *
+   * Structure defining all the types defined in a layer as void.
+   *
+   * \note This type is used to allow for the generic definition of methods with invalid dimensions. But code trying to call these methods will fail to compile.
+   */
+  struct void_layer_types
+  {
+    typedef void cell_content_t;
+    typedef void cell_t;
+    typedef void oriented_cell_t;
+    typedef void cell_flip_t;
+
+    typedef void cell_iterator;
+    typedef void cell_range;
+  };
+
+
+  /**
+   * \ingroup internal
+   * \class ComplexNthLayer_internal
+   *
+   * This class is used to access the various layers.
+   *
+   * If the dimension is incorrect, the type will be \c void_layer_types
+   */
+  template <int N, typename CellComplex, bool value>
+  struct ComplexNthLayer_internal;
+
+  template <int N, typename CellComplex>
+  struct ComplexNthLayer_internal<N,CellComplex,true>
+  {
+    typedef typename std::tuple_element<N+1,typename CellComplex::layers_t>::type type;
+  };
+
+  template <int N, typename CellComplex>
+  struct ComplexNthLayer_internal<N,CellComplex,false>
+  {
+    typedef void_layer_types type;
+  };
+
+  /**
+   * \ingroup internal
+   * \class ComplexNthLayer
+   *
+   * This class recover the type and value of the layer handling cells and cell flips of dimension N.
+   *
+   * CellComplex can be either a cell complex or a cell complex layer. And if the dimension is invalid, the result
+   * will be \c void_layer_types
+   */
+  template <int N, typename CellComplex>
+  struct ComplexNthLayer
+  {
+    typedef typename ComplexNthLayer_internal<N,CellComplex,(N>=-1 and N <= CellComplex::N+1)>::type type;
+  };
+
+  /**
+   * Helper function to retrieve the nth dimensional layer
+   */
+  template <int N1, typename CellComplex>
+  typename ComplexNthLayer<N1,CellComplex>::type& get_layer(CellComplex& C)
+  {
+    STATIC_ASSERT(N1>=-1 and N1<=CellComplex::N+1, "The layer of a cell complex is between -1 and N+1");
+    return std::get<N1+1>(C._layers);
+  }
+
+  /**
+   * Helper function to retrieve the constant reference to the nth dimensional layer
+   */
+  template <int N1, typename CellComplex>
+  const typename ComplexNthLayer<N1,CellComplex>::type& get_layer(const CellComplex& C)
+  {
+    STATIC_ASSERT(N1>=-1 and N1<=CellComplex::N+1, "The layer of a cell complex is between -1 and N+1");
+    return std::get<N1+1>(C._layers);
+  }
+
+  /**
+   * \ingroup utility
+   * \class NTypes
+   * Retrieve useful types for the cells of dimension N
+   */
+  template <int N, typename CellComplex>
+  struct NTypes
+  {
+    /// Type of the layer of dimension N
+    typedef typename ComplexNthLayer<N,CellComplex>::type layer_complex_t;
+
+    /// Type of the content of an N-cell
+    typedef typename layer_complex_t::cell_content_t cell_content_t;
+    /// Type of a N-cell
+    typedef typename layer_complex_t::cell_t cell_t;
+    /// Type of an oriented N-cell
+    typedef typename layer_complex_t::oriented_cell_t oriented_cell_t;
+    /**
+     * Type of a N-flip
+     * \note this type is \c void for N = 0 or -1
+     */
+    typedef typename layer_complex_t::cell_flip_t cell_flip_t;
+
+    /// Type of an iterator on N-cells
+    typedef typename layer_complex_t::cell_iterator cell_iterator;
+    /// Type of a range of N-cells
+    typedef typename layer_complex_t::cell_range cell_range;
+  };
+
+  template <typename CellComplex>
+  struct NTypes<0,CellComplex>
+  {
+    typedef typename ComplexNthLayer<0,CellComplex>::type layer_complex_t;
+    typedef typename layer_complex_t::cell_content_t cell_content_t;
+    typedef typename layer_complex_t::cell_t cell_t;
+    typedef typename layer_complex_t::oriented_cell_t oriented_cell_t;
+
+    typedef typename layer_complex_t::cell_iterator cell_iterator;
+    typedef typename layer_complex_t::cell_range cell_range;
+
+    // No such thing in 0D
+    typedef void cell_flip_t;
+  };
+
+  template <typename CellComplex>
+  struct NTypes<-1,CellComplex>
+  {
+    typedef typename ComplexNthLayer<-1,CellComplex>::type layer_complex_t;
+    typedef typename layer_complex_t::cell_content_t cell_content_t;
+    typedef typename layer_complex_t::cell_t cell_t;
+    typedef typename layer_complex_t::oriented_cell_t oriented_cell_t;
+
+    typedef typename layer_complex_t::cell_iterator cell_iterator;
+    typedef typename layer_complex_t::cell_range cell_range;
+    // No such thing in -1D
+    typedef void cell_flip_t;
+  };
+
+  /**
+   * \ingroup internal
+   * \class TopCellContent
+   *
+   * Content of the top cell. Empty, but different to not mix with bottom cell.
+   */
+  struct TopCellContent
+  { };
+
+
+}
+
+#endif // CELLFLIPS_UTILS_VVH
+

@@ -1,0 +1,1086 @@
+#ifndef CELLFLIPSLAYER_VVH
+#define CELLFLIPSLAYER_VVH
+
+#include "cell.h"
+#include <util/unorderedmap.h>
+#include <util/unorderedset.h>
+
+#include <set>
+
+#include <iterator>
+#include <algorithm>
+#include <functional>
+#include <type_traits>
+
+#include <util/forall.h>
+#include <util/static_assert.h>
+#include <util/range.h>
+#include <util/member_iterator.h>
+
+namespace util
+{
+  /**
+   * \class Defer
+   *
+   * Defer store a function or function object with no argument to be called when the defer object is destroyed
+   */
+  template <typename Function>
+  struct Defer
+  {
+    Defer(Function f)
+      : fct(f)
+    { }
+
+    ~Defer()
+    {
+      fct();
+    }
+
+    Function fct;
+  };
+
+  /**
+   * Create a local object that will call the function \c f when deleted
+   */
+  template <typename Function>
+  Defer<Function> defer(Function f)
+  {
+    return Defer<Function>(f);
+  }
+}
+
+
+namespace ndcomplex
+{
+
+  /**
+   * \ingroup internal
+   * \class FlipRequest
+   * Class representing a request to flip a face
+   *
+   * It is basically a pair of cells of dimension $n$ and $n-2$
+   */
+  template <int N, typename CellContent, typename JointContent>
+  struct FlipRequest
+  {
+    typedef Cell<N,CellContent> cell_t;
+    typedef Cell<N-2,JointContent> joint_t;
+
+    FlipRequest() : c(0), j(0)  { }
+    FlipRequest(const cell_t& cc, const joint_t& jj)
+      : c(cc), j(jj) { }
+    cell_t c;
+    joint_t j;
+
+    bool operator==(const FlipRequest& other) const
+    {
+      return c == other.c and j == other.j;
+    }
+
+    bool operator!=(const FlipRequest& other) const
+    {
+      return c != other.c or j != other.j;
+    }
+
+  };
+
+  /**
+   * \ingroup internal
+   * \class ContainerTypes
+   * Structure defining the type of the containers in a cell complex, given the cell type and the cell flip type
+   */
+  template <typename CellType, typename CellFlipType>
+  struct ContainerTypes
+  {
+    /// Main container
+    typedef std::unordered_map<CellType,std::set<CellFlipType*> > container;
+    /// Value in the container
+    typedef typename container::value_type value_type;
+
+    /// Iterator on the container
+    typedef typename container::iterator iterator;
+    /// Constant iterator on the container
+    typedef typename container::const_iterator const_iterator;
+
+    /// Range in the container
+    typedef util::range<iterator> range;
+    /// Constant range in the container
+    typedef util::range<const_iterator> const_range;
+
+    /// Iterator on the cells used as keys for the container
+    typedef util::SelectMemberIterator<const_iterator,const CellType,&value_type::first> cell_iterator;
+    /// Range of cells
+    typedef util::range<cell_iterator> cell_range;
+  };
+
+  /**
+   * \ingroup main
+   * \class CellFlip
+   * Type of an oriented flip \f$(c\!<\!f_1|f_2\!>\!j)\f$
+   */
+  template <int _N,
+            typename CellContent,
+            typename FaceContent,
+            typename JointContent>
+  struct CellFlip
+  {
+    enum
+      {
+        N = _N ///< Dimension of the flip
+      };
+    /// Cell of the flip
+    typedef Cell<N,CellContent> cell_t;
+    /// Face of the flip
+    typedef Cell<N-1,FaceContent> face_t;
+    /// Joint of the flip
+    typedef Cell<N-2,JointContent> joint_t;
+
+    /// Default constructor
+    CellFlip()
+      : cell(0)
+      , face1(0)
+      , face2(0)
+      , joint(0)
+    { }
+
+    /// Initialized constructor
+    CellFlip(const cell_t& c, const face_t& f1, const face_t& f2, const joint_t& j)
+      : cell(c)
+      , face1(f1)
+      , face2(f2)
+      , joint(j)
+    { }
+
+    // Copy constructor
+    CellFlip(const CellFlip& copy)
+      : cell(copy.cell)
+      , face1(copy.face1)
+      , face2(copy.face2)
+      , joint(copy.joint)
+    { }
+
+    // Move constructor
+    CellFlip(CellFlip&& copy)
+      : cell(std::move(copy.cell))
+      , face1(std::move(copy.face1))
+      , face2(std::move(copy.face2))
+      , joint(std::move(copy.joint))
+    { }
+
+    ///\name Flip orientation
+    //@{
+    /**
+     * Cell flip with opposite direction
+     */
+    CellFlip operator-() const
+    {
+      return CellFlip(cell, face2, face1, joint);
+    }
+
+    /**
+     * Cell flip identity
+     */
+    CellFlip operator+() const
+    {
+      return *this;
+    }
+
+    /**
+     * Multiply with a relative orientation
+     */
+    CellFlip& operator*=(const RelativeOrientation& ro)
+    {
+      if(ro == neg)
+        reverse();
+      return *this;
+    }
+
+    /**
+     * Reverse the direction of the cell flip
+     */
+    void reverse()
+    {
+      std::swap(face1, face2);
+    }
+
+    /**
+     * Orientation of the path going through the cell \c f
+     *
+     * \note the method doesn't test if the face is in the flip. If the face is not the face1, it assumes the face to be 
+     * face2
+     *
+     * \param f A cell in the flip
+     */
+    RelativeOrientation pathOrientation(const face_t& f) const
+    {
+      if(f == face1)
+        return pos;
+      else
+        return neg;
+    }
+
+    //@}
+
+    /**
+     * Check if the face \c f is in the flip
+     */
+    bool hasFace(const face_t& f) const
+    {
+      return face1 == f or face2 == f;
+    }
+
+    /**
+     * Return the face of the flip that is not \c f
+     */
+    const face_t& otherFace(const face_t& f) const
+    {
+      if(f == face1)
+        return face2;
+      return face1;
+    }
+
+    /**
+     * Replace the face \c old by \c n
+     * \returns true if the face \c old was found, false otherwise
+     */
+    bool replaceFace(const face_t& old, const face_t& n)
+    {
+      if(face1 == old)
+        {
+          face1 = n;
+          return true;
+        }
+      else if(face2 == old)
+        {
+          face2 = n;
+          return true;
+        }
+      return false;
+    }
+
+    /// A flip is valid if all the cells exists
+    bool valid() const
+    {
+      return cell and face1 and face2 and joint;
+    }
+
+    /// Equivalent to CellFlip::valid()
+    explicit operator bool() const
+    {
+      return this->valid();
+    }
+
+    /// Comparison of two non-oriented flips
+    bool equiv(const CellFlip& other) const
+    {
+      return (cell == other.cell and
+              joint == other.joint and
+              ((face1 == other.face1 and face2 == other.face2) or
+               (face1 == other.face2 and face2 == other.face1)));
+    }
+
+    /// Comparison of two oriented flips
+    bool operator==(const CellFlip& other) const
+    {
+      return (cell == other.cell and
+              face1 == other.face1 and
+              face2 == other.face2 and
+              joint == other.joint);
+    }
+
+    /// Comparison of two oriented flips
+    bool operator!=(const CellFlip& other) const
+    {
+      return (cell != other.cell or
+              face1 != other.face1 or
+              face2 != other.face2 or
+              joint != other.joint);
+    }
+
+    CellFlip& operator=(const CellFlip& copy)
+    {
+      cell = copy.cell;
+      face1 = copy.face1;
+      face2 = copy.face2;
+      joint = copy.joint;
+      return *this;
+    }
+
+    CellFlip& operator=(CellFlip&& other)
+    {
+      cell = std::move(other.cell);
+      face1 = std::move(other.face1);
+      face2 = std::move(other.face2);
+      joint = std::move(other.joint);
+      return *this;
+    }
+
+    /// Comparison to be able to use this in a set
+    bool operator<(const CellFlip& other) const
+    {
+      if(cell < other.cell) return true;
+      if(cell > other.cell) return false;
+      if(face1 < other.face1) return true;
+      if(face1 > other.face1) return false;
+      if(face2 < other.face2) return true;
+      if(face2 > other.face2) return false;
+      return joint < other.joint;
+    }
+
+    /// Cell of the flip
+    cell_t cell;
+    /// Left face of the flip
+    face_t face1;
+    /// Right face of the flip
+    face_t face2;
+    /// Joint of the flip
+    joint_t joint;
+  };
+
+  /**
+   * Modify the orientation of a flip depending on \c ro
+   * \param ro if neg, invert the flip, if pos do nothing, if invalid returns an invalid flip
+   * \param fl flip to use as reference
+   * \relates CellFlip
+   */
+  template <int _N,
+            typename CellContent,
+            typename FaceContent,
+            typename JointContent>
+  CellFlip<_N, CellContent, FaceContent, JointContent>
+  operator*(const RelativeOrientation& ro, const CellFlip<_N, CellContent, FaceContent, JointContent>& fl)
+  {
+    typedef CellFlip<_N, CellContent, FaceContent, JointContent> l_cell_flip_t;
+    switch(ro)
+      {
+      case pos:
+        return fl;
+      case neg:
+        return l_cell_flip_t(fl.cell, fl.face2, fl.face1, fl.joint);
+      default: // i.e. invalid
+        return l_cell_flip_t();
+      }
+  }
+
+  /**
+   * Modify the orientation of a flip depending on \c ro
+   * \param ro if neg, invert the flip, if pos do nothing, if invalid returns an invalid flip
+   * \param fl flip to use as reference
+   * \relates CellFlip
+   */
+  template <int _N,
+            typename CellContent,
+            typename FaceContent,
+            typename JointContent>
+  CellFlip<_N, CellContent, FaceContent, JointContent>
+  operator*(const CellFlip<_N, CellContent, FaceContent, JointContent>& fl, const RelativeOrientation& ro)
+  {
+    typedef CellFlip<_N, CellContent, FaceContent, JointContent> l_cell_flip_t;
+    switch(ro)
+      {
+      case pos:
+        return fl;
+      case neg:
+        return l_cell_flip_t(fl.cell, fl.face2, fl.face1, fl.joint);
+      default: // i.e. invalid
+        return l_cell_flip_t();
+      }
+  }
+
+  /**
+   * Check if two cells match
+   *
+   * Two cell match if they are equal, or if one of them is null
+   *
+   * \relates Cell
+   */
+  template <int _N,
+            typename CellContent>
+  bool match(const Cell<_N,CellContent>& c1, const Cell<_N,CellContent>& c2)
+  {
+    return (c1.isNull() or c2.isNull() or c1 == c2);
+  }
+
+  /**
+   * Check if two flips match.
+   *
+   * Two flip match if either if true:
+   * \li all the cells match each other (i.e. cell match cell, joint match joint, ...)
+   * \li cell and joint match, but the faces of cf1 match the opposite faces in cf2
+   *
+   * \relates CellFlip
+   */
+  template <int _N,
+            typename CellContent,
+            typename FaceContent,
+            typename JointContent>
+  bool
+  match(const CellFlip<_N,CellContent,FaceContent,JointContent>& cf1,
+        const CellFlip<_N,CellContent,FaceContent,JointContent>& cf2)
+  {
+    return (match(cf1.cell, cf2.cell) and
+            match(cf1.joint, cf2.joint) and
+            ((match(cf1.face1, cf2.face1) and match(cf1.face2, cf2.face2)) or
+             (match(cf1.face1, cf2.face2) and match(cf1.face2, cf2.face1))));
+  }
+
+  /**
+   * \ingroup internal
+   * \class CellComplexLayer
+   *
+   * This is the class holding most of the data structure. If contains the flips of all but the dimension -1, 0 and N+1.
+   *
+   * A layer holds the flips whose cells have the dimension of the layer.
+   */
+  template <int _N, typename CellContent, typename FaceContent, typename JointContent>
+  struct CellComplexLayer
+  {
+    enum {
+      N = _N, ///< Dimension of the layer
+    };
+
+    STATIC_ASSERT(N > 0, "This class represent only layers of dimension at least 1.");
+
+    /// Content of a cell of this dimension
+    typedef CellContent cell_content_t;
+    /// Content of a cell of dimension N-1
+    typedef FaceContent face_content_t;
+    /// Content of a cell of dimension N-2
+    typedef JointContent joint_content_t;
+    /// Type of a cell
+    typedef Cell<N,cell_content_t> cell_t;
+    /// Type of a face
+    typedef Cell<N-1,face_content_t> face_t;
+    /// Type of a joint
+    typedef Cell<N-2,joint_content_t> joint_t;
+    /// Type of an oriented cell
+    typedef OrientedObject<cell_t> oriented_cell_t;;
+    /// Type of an oriented face
+    typedef OrientedObject<face_t> oriented_face_t;
+    /// Type of an oriented joint
+    typedef OrientedObject<joint_t> oriented_joint_t;
+
+    /// Type of a flip in this layer
+    typedef CellFlip<N,cell_content_t,face_content_t,joint_content_t> cell_flip_t;
+
+    /// Containers for flips referenced by cell
+    typedef ContainerTypes<cell_t, cell_flip_t> CellTypes;
+    /// Containers for flips referenced by face
+    typedef ContainerTypes<face_t, cell_flip_t> FaceTypes;
+    /// Containers for flips referenced by joint
+    typedef ContainerTypes<joint_t, cell_flip_t> JointTypes;
+
+    /// Type of the container referencing the flips by cell
+    typedef typename CellTypes::container cell_flips_access_t;
+    /// Type of the container referencing the flips by face
+    typedef typename FaceTypes::container face_flips_access_t;
+    /// Type of the container referencing the flips by joint
+    typedef typename JointTypes::container joint_flips_access_t;
+
+    /// Iterator on the cells
+    typedef typename CellTypes::cell_iterator cell_iterator;
+    /// Iterator on the faces
+    typedef typename FaceTypes::cell_iterator face_iterator;
+    /// Iterator on the joints
+    typedef typename JointTypes::cell_iterator joint_iterator;
+
+    /// Range of cells
+    typedef typename CellTypes::cell_range cell_range;
+    /// Range of faces
+    typedef typename FaceTypes::cell_range face_range;
+    /// Range of joints
+    typedef typename JointTypes::cell_range joint_range;
+
+    /// Type of the container for the relative orientation between cell and face
+    typedef std::unordered_map<std::pair<cell_t,face_t>,RelativeOrientation> orientation_container_t;
+
+    /// Type of a flip request, i.e. to find the faces of a pair cell/joint
+    typedef FlipRequest<N,cell_content_t,joint_content_t> flip_request_t;
+
+    /// Type of the container used for the flip operation
+    typedef std::unordered_map<flip_request_t,cell_flip_t*> flip_container_t;
+
+    /// Container for the flip operation
+    flip_container_t flip_access;
+    /// Container for the flips held by cell
+    cell_flips_access_t cell_access;
+    /// Container for the flips held by face
+    face_flips_access_t face_access;
+    /// Container for the flips held by joint
+    joint_flips_access_t joint_access;
+
+    /// Container for the relative orientations in this layer
+    orientation_container_t relative_orientations;
+
+    /// Type of an object count
+    typedef typename cell_flips_access_t::size_type size_type;
+
+    /**
+     * Destructor.
+     *
+     * Before leaving, clean the data structure (and destroy all cell flip)
+     */
+    ~CellComplexLayer()
+    {
+      clear();
+    }
+
+    /// Erase all the cell flips
+    void clear()
+    {
+      forall const typename CellTypes::value_type& ca in cell_access:
+        {
+          forall cell_flip_t* pf in ca.second:
+          delete pf;
+        }
+      flip_access.clear();
+      cell_access.clear();
+      face_access.clear();
+      joint_access.clear();
+      relative_orientations.clear();
+    }
+
+    /// Returns a N-cell
+    const cell_t& any() const
+    {
+      if(cell_access.empty()) return cell_t::null;
+      return cell_access.begin()->first;
+    }
+
+    /// Is the cell in this layer
+    bool contains(const cell_t& cell) const
+    {
+      return cell_access.find(cell) != cell_access.end();
+    }
+
+    /// Is the cell in this layer
+    bool hasCell(const cell_t& cell) const
+    {
+      return contains(cell);
+    }
+
+    /// Is the face in this layer
+    bool hasFace(const face_t& face) const
+    {
+      return face_access.find(face) != face_access.end();
+    }
+
+    /// Is the face in this layer
+    bool hasJoint(const joint_t& joint) const
+    {
+      return joint_access.find(joint) != joint_access.end();
+    }
+
+    /// Is the layer empty
+    bool empty() const
+    {
+      return cell_access.empty();
+    }
+
+    /// Number of cells in this layer
+    size_type nbCells() const
+    {
+      return cell_access.size();
+    }
+
+    /// Number of faces in this layer
+    size_type nbFaces() const
+    {
+      return face_access.size();
+    }
+
+    /// Number of joints in this layer
+    size_type nbJoints() const
+    {
+      return joint_access.size();
+    }
+
+    /// List of cells
+    cell_range cells() const
+    {
+      return util::make_range(cell_iterator(cell_access.begin()),
+                              cell_iterator(cell_access.end()));
+    }
+
+    /// List of faces
+    face_range faces() const
+    {
+      return util::make_range(face_iterator(face_access.begin()),
+                              face_iterator(face_access.end()));
+    }
+
+    /// List of joints
+    joint_range joints() const
+    {
+      return util::make_range(joint_iterator(joint_access.begin()),
+                              joint_iterator(joint_access.end()));
+    }
+
+    /**
+     * \class RemoveFlipGuard
+     *
+     * Function object used as a guard while adding a flip. If called, the flip stored in removed from the layer
+     *
+     * \note the cell flip is a reference to be able to modify it outside the method
+     */
+    struct RemoveFlipGuard
+    {
+      /// Initialized constructor
+      RemoveFlipGuard(CellComplexLayer *cc, cell_flip_t* &fl)
+        : C(cc)
+        , flip(fl)
+      { }
+
+      /// Copy constructor
+      RemoveFlipGuard(const RemoveFlipGuard& copy)
+        : C(copy.C)
+        , flip(copy.flip)
+      { }
+
+      /// If the flip is not null, remove it
+      void operator()()
+      {
+        if(flip) C->removeFlip(flip);
+      }
+
+      /// Layer being modified
+      CellComplexLayer *C;
+      /// Flip to remove
+      cell_flip_t* &flip;
+    };
+
+    /**
+     * Add a flip to this layer
+     *
+     * If the operation fails, the structure is left unchanged
+     *
+     * \note the argument is NOT checked!
+     */
+    bool addFlip(cell_flip_t* flip)
+    {
+      //auto def = util::defer([&flip, this]() { if(flip) this->removeFlip(flip); });
+      auto def = util::defer(RemoveFlipGuard(this, flip));
+
+      if(!flip_access.insert(std::make_pair(flip_request_t(flip->cell, flip->joint), flip)).second) return false;
+      if(!cell_access[flip->cell].insert(flip).second) return false;
+      if(!face_access[flip->face1].insert(flip).second) return false;
+      if(!face_access[flip->face2].insert(flip).second) return false;
+      if(!joint_access[flip->joint].insert(flip).second) return false;
+
+      // Prevent the deferred function from erasing the flip
+      flip = 0;
+
+      return true;
+    }
+
+    /**
+     * Remove a flip from the layer and deletes it
+     *
+     * This method can remove partially inserted flips too.
+     */
+    bool removeFlip(cell_flip_t* flip)
+    {
+      bool success = true;
+      typename flip_container_t::iterator found = flip_access.find(flip_request_t(flip->cell, flip->joint));
+      if(found != flip_access.end())
+        flip_access.erase(found);
+      else
+        success = false;
+      success &= removeFromAccess(flip, flip->joint, joint_access);
+      success &= removeFromAccess(flip, flip->face1, face_access);
+      success &= removeFromAccess(flip, flip->face2, face_access);
+      success &= removeFromAccess(flip, flip->cell, cell_access);
+      delete flip;
+      return success;
+    }
+
+    /**
+     * Get the flip corresponding to the request.
+     *
+     * This method is more for internal purpose. A request is nothing more than a pair of cells of dimension n and n-2.
+     */
+    cell_flip_t* flip(const flip_request_t& fr) const
+    {
+      typename flip_container_t::const_iterator found = flip_access.find(fr);
+      if(found != flip_access.end())
+        return found->second;
+      return 0;
+    }
+
+    /**
+     * Finds the flip with the given cell and joint
+     */
+    cell_flip_t* flip(const cell_t& c, const joint_t& j) const
+    {
+      return flip(flip_request_t(c, j));
+    }
+
+    /**
+     * Finds the flip with given the cell, face and joint
+     */
+    cell_flip_t* flip(const cell_t& c, const face_t&f, const joint_t& j) const
+    {
+      cell_flip_t* answer = flip(c, j);
+      if(answer and answer->hasFace(f))
+        return answer;
+      return 0;
+    }
+
+  protected:
+    /**
+     * Remove a flip from a particular access table
+     */
+    template <typename CellType, typename FlipAccess>
+    bool removeFromAccess(cell_flip_t* flip, const CellType& cell, FlipAccess& access)
+    {
+      auto found = access.find(cell);
+      if(found == access.end()) return false;
+      std::set<cell_flip_t*>& lst = found->second;
+      if(!lst.erase(flip))
+        return false;
+      if(lst.empty())
+        access.erase(found);
+      return true;
+    }
+
+  public:
+
+    /// Remove the relative orientation between a cell and a face
+    bool removeRelativeOrientation(const cell_t& c, const face_t& f)
+    {
+      return relative_orientations.erase(std::make_pair(c,f)) != 0;
+    }
+
+    /// Set the relative orientation between a cell and its face
+    void setRelativeOrientation(const cell_t& c, const face_t& f, const RelativeOrientation& ro)
+    {
+      relative_orientations[std::make_pair(c,f)] = ro;
+    }
+
+    /// Retrieve the relative orientation between a cell and its face, if any
+    RelativeOrientation relativeOrientation(const cell_t& c, const face_t& f) const
+    {
+      auto found = relative_orientations.find(std::make_pair(c,f));
+      if(found != relative_orientations.end())
+        return found->second;
+      return invalid;
+    }
+
+    /// Display the flips in this layer
+    void displayFlips() const
+    {
+      out << "Flips of dimension " << N << " (" << cell_access.size() << "):";
+      int k = 0;
+      forall const typename CellTypes::value_type& act in cell_access:
+        forall cell_flip_t* pf in act.second:
+        {
+          if(k++ == 0) out << "\n\t";
+          else out << " ";
+          if(k > 3) k = 0;
+          out << *pf;
+        }
+      out << endl;
+    }
+
+  };
+
+
+  /**
+   * \ingroup internal
+   * \class BottomLayer
+   * Structure holding the bottom cell only
+   *
+   * This class is always the bottom of the cell complex recursion
+   */
+  struct BottomLayer
+  {
+    enum {
+      N = -1, ///< Dimension of this layer
+    };
+
+    /// Type of the content of a cell
+    typedef EmptyCell cell_content_t;
+    /// Type of a cell
+    typedef Cell<-1,cell_content_t> cell_t;
+    /// Type of an oriented cell
+    typedef OrientedObject<cell_t> oriented_cell_t;
+
+    /// Iterator on cells
+    typedef const cell_t* cell_iterator;
+    /// Range on cells
+    typedef util::range<cell_iterator> cell_range;
+
+    /// Type of a count of object
+    typedef size_t size_type;
+
+    /// List of cells
+    cell_range cells() const
+    {
+      return util::make_range(&_, &_+1);
+    }
+
+    /// The bottom layer is never empty
+    bool empty() const { return false; }
+    /// It always has 1 cell
+    size_type nbCells() const { return 1; }
+
+    /**
+     * Set the bottom cell
+     *
+     * \note This function is dangerous and should NEVER be used after some vertex or edge has been inserted
+     */
+    void setBottom(cell_t c)
+    {
+      _ = c;
+    }
+
+    /// Is the cell the (unique) bottom cell for this complex
+    bool contains(const cell_t& cell) const
+    {
+      return cell == _;
+    }
+
+    /// Is the cell the (unique) bottom cell for this complex
+    bool hasCell(const cell_t& cell) const
+    {
+      return contains(cell);
+    }
+
+    /// Instance of the bottom cell
+    cell_t _;
+  };
+
+  /**
+   * \ingroup internal
+   * \class VertexCellComplex
+   * Class holding the vertices
+   */
+  template <typename CellContent>
+  struct VertexCellComplex
+  {
+    /// Type of the bottom version
+    typedef Cell<-1> bottom_t;
+
+    /// Content of a cell
+    typedef CellContent cell_content_t;
+    /// Type of a cell
+    typedef Cell<0,cell_content_t> cell_t;
+    /// Type of an oriented cell
+    typedef OrientedObject<cell_t> oriented_cell_t;
+
+    enum {
+      N = 0, ///< Dimension of the vertices
+    };
+
+    /// Type of the container for vertices
+    typedef std::unordered_set<cell_t> cell_container_t;
+    /// Iterator on the vertices
+    typedef typename cell_container_t::const_iterator cell_iterator;
+    /// Range on the vertices
+    typedef util::range<cell_iterator> cell_range;
+    /// Type of the faces
+    typedef Cell<-1,EmptyCell> face_t;
+
+    /// Type of a count of object
+    typedef typename cell_container_t::size_type size_type;
+
+    /// Container of vertices
+    cell_container_t cell_access;
+
+    /// Bottom cell
+    face_t _;
+
+    /// On destruction, free the structure
+    ~VertexCellComplex()
+    {
+      clear();
+    }
+
+    /// Set the bottom cell
+    void setBottom(face_t c)
+    {
+      _ = c;
+    }
+
+    /// Remove any value from the structure
+    void clear()
+    {
+      cell_access.clear();
+    }
+
+    /// Retrieve the list of cells (i.e. vertices)
+    cell_range cells() const
+    {
+      return util::make_range(cell_access.begin(), cell_access.end());
+    }
+
+    /// Are there any vertices in the layer?
+    bool empty() const
+    {
+      return cell_access.empty();
+    }
+
+    /// Number of vertices
+    size_type nbCells() const { return cell_access.size(); }
+    /// Number of bottom cell ... always 1
+    size_type nbFaces() const { return 1; }
+
+    /// Add a vertex to the layer
+    bool addVertex(const cell_t& v)
+    {
+      std::pair<cell_iterator,bool> inserted = cell_access.insert(v);
+      return inserted.second;
+    }
+
+    /**
+     * Remove a vertex from the layer
+     * \returns Whether the vertex was in the layer or not
+     */
+    bool removeVertex(const cell_t& v)
+    {
+      return cell_access.erase(v) > 0;
+    }
+
+    /// Display the list of vertices
+    void displayFlips() const
+    {
+      out << "Vertices (" << cell_access.size() <<"):";
+      forall const cell_t& c in cell_access:
+        out << " " << shortString(c);
+      out << endl;
+    }
+
+    /// Check if the layer contains this vertex
+    bool contains(const cell_t& cell) const
+    {
+      return cell_access.find(cell) != cell_access.end();
+    }
+
+    /// Check if the layer contains this vertex
+    bool hasCell(const cell_t& cell) const
+    {
+      return contains(cell);
+    }
+
+    /// Check if this is the layer cell of this complex
+    bool hasFace(const face_t& face) const
+    {
+      return face == _;
+    }
+
+    /**
+     * The relative orientation of a vertex and the bottom is always \c pos
+     *
+     * \note this method doesn't check if the cell and face are even valid!
+     */
+    RelativeOrientation relativeOrientation(const cell_t& /*c*/, const face_t& /*f*/) const
+    {
+      return pos;
+    }
+
+  };
+
+  template <typename U, typename... Args>
+  struct PrependTuple;
+
+  template <typename U>
+  struct PrependTuple<U>
+  {
+    typedef std::tuple<U> type;
+  };
+
+  template <typename U, typename... Args>
+  struct PrependTuple<U,std::tuple<Args...> >
+  {
+    typedef std::tuple<U,Args...> type;
+  };
+
+  template <int _N, typename JointContent, typename FaceContent, typename... CellContents>
+  struct LayerConstructor_;
+
+  template <int _N, typename JointContent, typename FaceContent>
+  struct LayerConstructor_<_N,JointContent,FaceContent>
+  {
+    typedef std::tuple<CellComplexLayer<_N,TopCellContent,FaceContent,JointContent> > type;
+  };
+
+  template <int _N, typename JointContent, typename FaceContent, typename CellContent, typename... OtherCellContents>
+  struct LayerConstructor_<_N,JointContent,FaceContent,CellContent,OtherCellContents...>
+  {
+    typedef typename LayerConstructor_<_N+1,FaceContent,CellContent,OtherCellContents...>::type prev_type;
+    typedef typename PrependTuple<CellComplexLayer<_N,CellContent,FaceContent,JointContent>,prev_type>::type type;
+  };
+
+  /**
+   * \ingroup internal
+   * \class LayerConstructor
+   *
+   * Class constructing the tuple of layers, with one layer per cell type, plus -1 and N+1
+   */
+  template <typename VertexContent, typename... CellContents>
+  struct LayerConstructor
+  {
+    typedef typename LayerConstructor_<1,EmptyCell,VertexContent,CellContents...>::type prev_type;
+    typedef typename PrependTuple<BottomLayer,typename PrependTuple<VertexCellComplex<VertexContent>,prev_type>::type>::type type;
+  };
+
+  /// Output the top cell
+  template <int N>
+  QTextStream& operator<<(QTextStream& ts, const Cell<N,TopCellContent>& )
+  {
+    ts << "[T/" << N << "]";
+    return ts;
+  }
+
+  /// Output a flip
+  template <int N,
+            typename CellContent,
+            typename FaceContent,
+            typename JointContent>
+  QTextStream&
+  operator<<(QTextStream& ts, const CellFlip<N,CellContent,FaceContent,JointContent>& cf)
+  {
+    ts << QString("(%1|%2<%3,%4>%5)").arg(N).arg(shortString(cf.cell)).arg(shortString(cf.face1))
+      .arg(shortString(cf.face2)).arg(shortString(cf.joint));
+    return ts;
+  }
+
+  /// Short-string output for the top cell
+  template <int N>
+  QString shortString(const Cell<N,TopCellContent>& )
+  {
+    return "T";
+  }
+
+}
+
+namespace std
+{
+  template <int N, typename CellContent, typename JointContent>
+  struct hash<ndcomplex::FlipRequest<N,CellContent,JointContent>>
+  {
+    typedef ndcomplex::FlipRequest<N,CellContent,JointContent> value_t;
+    typedef typename value_t::cell_t cell_t;
+    typedef typename value_t::joint_t joint_t;
+    size_t operator()(const value_t& v) const
+    {
+      static const hash<cell_t> cell_hash = hash<cell_t>();
+      static const hash<joint_t> joint_hash = hash<joint_t>();
+      return cell_hash(v.c) ^ joint_hash(v.j);
+    }
+  };
+
+  template <int N1, typename CellContent, typename FaceContent>
+  struct hash<std::pair<ndcomplex::Cell<N1,CellContent>,ndcomplex::Cell<N1-1,FaceContent> > >
+  {
+    size_t operator()(const std::pair<ndcomplex::Cell<N1,CellContent>,ndcomplex::Cell<N1-1,FaceContent> >& p) const
+    {
+      static const hash<ndcomplex::cell_identity_t> h = hash<ndcomplex::cell_identity_t>();
+      return h(p.first.id()) ^ h(p.second.id());
+    }
+  };
+}
+
+
+
+#endif // CELLFLIPSLAYER_VVH

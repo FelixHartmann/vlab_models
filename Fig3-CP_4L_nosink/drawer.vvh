@@ -1,0 +1,123 @@
+#ifndef DRAWER_VVH
+#define DRAWER_VVH
+
+#include "drawer_base.h"
+#include "complex.h"
+
+#include <util/parms.h>
+#include <util/mangling.h>
+using namespace ndcomplex;
+
+
+class ComplexDrawer : public Drawable
+{
+  Q_OBJECT
+  public:
+  ComplexDrawer(Palette *pal, CellComplex3D *c, QObject *parent);
+  ~ComplexDrawer();
+
+  void init(Viewer *v, Shader *s);
+  void finalize(Viewer *);
+  void preDraw(Viewer *);
+  void updatePositions();
+  void updateColors();
+  Point3d vertexNormal(ccvertex v, face f, cell c) const;
+  void addFaceTriangles(const float& col,
+                        size_t& num, std::vector<Point3d>& fs,
+                        std::vector<Point3d>& ns,
+                        std::vector<float>& cols,
+                        const face& f,
+                        const cell& c = cell::null) const;
+  void updateAll();
+  BSphere boundingSphere() const;
+  void setCellComplex(CellComplex3D *c);
+  void reread();
+  QMutex* mutex();
+
+  Shader *trans;
+  QMutex m;
+
+  Vertices *vs;
+  Edges *es;
+  Faces *fs;
+  Cells *cs;
+
+  CellComplex3D *cplx;
+
+  Palette *palette;
+
+  bool firstInit;
+  bool faceCull;
+  bool showFaceNormals, showVertexNormals;
+  std::vector<Color> palette_texture;
+  GLuint palTexId;
+  bool palette_updated;
+
+  Point3d pmin, pmax;
+
+  public slots:
+  void selectVertex(size_t id);
+  void selectEdge(size_t id);
+  void selectFace(size_t id);
+  void selectCell(size_t id);
+
+  signals:
+  void vertexSelected(size_t id);
+  void edgeSelected(size_t id);
+  void faceSelected(size_t id);
+  void cellSelected(size_t id);
+};
+
+struct SelectedVertex : public Drawable
+{
+  SelectedVertex(ccvertex vv, ComplexDrawer *parent);
+
+  void drawOpaque(Viewer *);
+
+  void drawWithColors(Viewer *);
+  void postSelection(const QPoint&, Viewer *v);
+
+  ccvertex v;
+};
+
+struct SelectedEdge : public Drawable
+{
+  SelectedEdge(const CellComplex3D& C, edge e, ComplexDrawer *parent);
+
+  void drawOpaque(Viewer *);
+  void drawWithColors(Viewer *);
+  void postSelection(const QPoint&, Viewer *v);
+
+  edge e;
+  std::array<ccvertex,2> vs;
+
+};
+
+struct SelectedFace : public Drawable
+{
+  SelectedFace(const CellComplex3D& C, face f, ComplexDrawer *parent);;
+
+  void init(Viewer *, Shader *def);
+  void drawOpaque(Viewer *);
+  void drawWithColors(Viewer *);
+  void postSelection(const QPoint&, Viewer *v);
+
+  face f;
+  std::vector<ccvertex> vs;
+  Shader *opaque;
+};
+
+struct SelectedCell : public Drawable
+{
+  SelectedCell(const CellComplex3D& C, cell c, ComplexDrawer *parent);;
+
+  void init(Viewer *, Shader *def);
+  void drawOpaque(Viewer *);
+  //void drawWithColors(Viewer *);
+
+  cell c;
+  Shader *opaque;
+};
+
+#endif // DRAWER_VVH
+

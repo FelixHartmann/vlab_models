@@ -1,0 +1,601 @@
+#include "drawer.h"
+
+ComplexDrawer::ComplexDrawer(Palette *pal, CellComplex3D *c, QObject *parent)
+  : Drawable(parent)
+  , trans(0)
+  , m(QMutex::Recursive)
+  , vs(0)
+  , es(0)
+  , fs(0)
+  , cs(0)
+  , cplx(c)
+  , palette(pal)
+  , firstInit(true)
+  , palTexId(0)
+  , palette_updated(false)
+{
+  palette_texture.resize(256);
+
+  vs = new Vertices(mutex(), this);
+  es = new Edges(mutex(), this);
+  fs = new Faces(mutex(), this);
+  cs = new Cells(mutex(), this);
+
+  connect(vs, SIGNAL(selectVertex(size_t)), this, SLOT(selectVertex(size_t)));
+  connect(es, SIGNAL(selectEdge(size_t)), this, SLOT(selectEdge(size_t)));
+  connect(fs, SIGNAL(selectFace(size_t)), this, SLOT(selectFace(size_t)));
+  connect(cs, SIGNAL(selectCell(size_t)), this, SLOT(selectCell(size_t)));
+
+  this->setObjectName("Cell Complex");
+  addFilename("view.v");
+  addFilename("pal.map");
+}
+
+void ComplexDrawer::selectVertex(size_t id)
+{
+  emit vertexSelected(id);
+}
+
+void ComplexDrawer::selectEdge(size_t id)
+{
+  emit edgeSelected(id);
+}
+
+void ComplexDrawer::selectFace(size_t id)
+{
+  emit faceSelected(id);
+}
+
+void ComplexDrawer::selectCell(size_t id)
+{
+  emit cellSelected(id);
+}
+
+
+ComplexDrawer::~ComplexDrawer()
+{
+  if(trans) delete trans;
+  trans = 0;
+}
+
+void ComplexDrawer::init(Viewer *v, Shader *s)
+{
+  trans = new drawing::Shader(*s);
+  //trans->setVerbosity(5);
+  trans->changeFragmentShaderCode(Drawable::FS_COLOR,
+                                  QString("uniform float transparency;\n"
+                                          "uniform sampler1D palette;\n"
+                                          "varying float faceColor;\n"
+                                          "void color()\n"
+                                          "{\n"
+                                          "  if(transparency > 0) {\n"
+                                          "    gl_FragColor = light(texture1D(palette, faceColor));\n"
+                                          "    gl_FragColor.a = transparency;\n"
+                                          "  } else discard;\n"
+                                          "}\n"
+                                         ));
+  trans->changeVertexShaderCode(Drawable::VS_COLOR,
+                                QString("attribute float vertexColor;\n"
+                                        "varying float faceColor;\n"
+                                        "void color()\n"
+                                        "{\n"
+                                        "  faceColor = vertexColor;\n"
+                                        "}\n")
+                               );
+  trans->setupShaders();
+
+  // Allocate palette texture
+  glGenTextures(1, &palTexId);
+  glBindTexture(GL_TEXTURE_1D, palTexId);
+  glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA, 256, 0, GL_RGBA, GL_FLOAT, &palette_texture.front());
+  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+  glBindTexture(GL_TEXTURE_1D, 0);
+
+  palette_updated = false;
+
+  trans->setUniform("palette", drawing::GLSLValue(AT_PALETTE));
+
+  vs->setPalTexId(palTexId);
+  vs->init(v, trans, s);
+  es->setPalTexId(palTexId);
+  es->init(v, trans, s);
+  fs->setPalTexId(palTexId);
+  fs->init(v, trans, s);
+  cs->setPalTexId(palTexId);
+  cs->init(v, trans, s);
+}
+
+void ComplexDrawer::finalize(Viewer *)
+{
+  if(palTexId)
+  {
+    glDeleteTextures(1, &palTexId);
+    palTexId = 0;
+  }
+  if(trans)
+  {
+    trans->cleanShaders();
+    delete trans;
+    trans = 0;
+  }
+}
+
+void ComplexDrawer::preDraw(Viewer *)
+{
+  QMutexLocker lock(mutex());
+  if(palette_updated)
+  {
+    palette_updated = false;
+    glBindTexture(GL_TEXTURE_1D, palTexId);
+    glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA, 256, 0, GL_RGBA, GL_FLOAT, &palette_texture.front());
+    glBindTexture(GL_TEXTURE_1D, 0);
+  }
+}
+
+void ComplexDrawer::updatePositions()
+{
+  QMutexLocker lock(mutex());
+}
+
+void ComplexDrawer::updateColors()
+{
+  QMutexLocker lock(mutex());
+}
+
+Point3d ComplexDrawer::vertexNormal(ccvertex v, face f, cell c) const
+{
+  if(!c) c = cplx->anyCoface(f);
+  if(!c) return f->normal;
+  QueryType Q;
+  Point3d normal = cplx->relativeOrientation(c,f)*f->normal*f->area;
+  auto pcfs = cplx->match(f,Q,Q,v);
+  vvassert(not pcfs.empty());
+  auto pcf = *pcfs.begin();
+  edge e1 = pcf->face1;
+  edge e2 = pcf->face2;
+  face pf = f;
+  while(!e1->crease and e1 != e2)
+  {
+    face nf = cplx->flip(c,pf,e1);
+    edge ne1 = cplx->flip(nf,e1,v);
+    Point3d n = cplx->relativeOrientation(c,nf)*nf->normal * nf->area;
+    normal += n;
+    pf = nf;
+    e1 = ne1;
+  }
+  if(e1 != e2)
+  {
+    pf = f;
+    while(!e2->crease)
+    {
+      face nf = cplx->flip(c,pf,e2);
+      edge ne1 = cplx->flip(nf,e2,v);
+      Point3d n = cplx->relativeOrientation(c,nf)*nf->normal * nf->area;
+      normal += n;
+      pf = nf;
+      e2 = ne1;
+    }
+  }
+  return util::normalized(normal);
+}
+
+void ComplexDrawer::addFaceTriangles(const float& col,
+                                     size_t& num, std::vector<Point3d>& fs,
+                                     std::vector<Point3d>& ns,
+                                     std::vector<float>& cols,
+                                     const face& f,
+                                     const cell& c) const
+{
+  Point3d cpos;
+  RelativeOrientation orien = pos;
+  if(c)
+  {
+    orien = cplx->relativeOrientation(c,f);
+    cpos = c->pos;
+  }
+  std::vector<ccvertex> vertices = cplx->orderedVertices(orien*f);
+  std::vector<Point3d> vs(vertices.size()), normals(vertices.size());
+  Point3d n;
+  for(size_t i = 0 ; i < vertices.size() ; i++)
+  {
+    ccvertex v = vertices[i];
+    vs[i] = v->pos;
+    if(c)
+      normals[i] = vertexNormal(v, f, c);
+    else
+      normals[i] = f->normal;
+    n += normals[i];
+  }
+
+  Point3d center = f->pos;
+  normalize(n);
+  size_t prev = vs.size()-1;
+  for(size_t i = 0 ; i < vs.size() ; ++i)
+  {
+    ns[num] = n;
+    cols[num] = col;
+    fs[num++] = center;
+    ns[num] = normals[prev];
+    cols[num] = col;
+    fs[num++] = vs[prev];
+    ns[num] = normals[i];
+    cols[num] = col;
+    fs[num++] = vs[i];
+    prev = i;
+  }
+}
+
+void ComplexDrawer::updateAll()
+{
+  QMutexLocker lock(mutex());
+
+  std::vector<Point3d>& pts = vs->pts;
+  std::vector<Colorub>& vid = vs->vid;
+
+  pts.resize(cplx->nbVertices());
+  vid.resize(cplx->nbVertices());
+
+  size_t num = 0;
+  pmin = Point3d(HUGE_VAL,HUGE_VAL,HUGE_VAL);
+  pmax = -pmin;
+  forall const ccvertex& v in cplx->vertices():
+  {
+    vid[num] = numToColor(v.num());
+    pts[num++] = v->pos;
+    if(v->pos.x() < pmin.x()) pmin.x() = v->pos.x();
+    if(v->pos.y() < pmin.y()) pmin.y() = v->pos.y();
+    if(v->pos.z() < pmin.z()) pmin.z() = v->pos.z();
+    if(v->pos.x() > pmax.x()) pmax.x() = v->pos.x();
+    if(v->pos.y() > pmax.y()) pmax.y() = v->pos.y();
+    if(v->pos.z() > pmax.z()) pmax.z() = v->pos.z();
+  }
+
+  std::vector<Point3d>& lines = es->lines;
+  std::vector<Colorub>& edge_ids = es->edge_ids;
+  std::vector<Point3d>& lines_center = es->centers;
+
+  lines.resize(cplx->nbEdges()*2);
+  edge_ids.resize(cplx->nbEdges()*2);
+  lines_center.resize(cplx->nbEdges()*2);
+  num = 0;
+  forall const edge& e in cplx->edges():
+  {
+    ccvertex v1(0), v2(0);
+    std::tie(v1,v2) = cplx->orderedVertices(+e);
+    lines_center[num] = lines_center[num+1] = (v1->pos+v2->pos)/2;
+    edge_ids[num] = edge_ids[num+1] = numToColor(e.num());
+    lines[num++] = v1->pos;
+    lines[num++] = v2->pos;
+  }
+  vvassert(num == lines.size());
+
+  // Count the number of triangles needed for the faces and cells
+  size_t nb_faces = 0;
+  size_t nb_cells = 0;
+  forall const face& f in cplx->faces():
+  {
+    size_t nbf = cplx->nbFaces(f);
+    nb_faces += nbf;
+    nb_cells += nbf * cplx->nbCofaces(f);
+  }
+  nb_faces *= 3; // 3 pts per triangle
+  nb_cells *= 3;
+
+  std::vector<Point3d>& faces = fs->faces;
+  std::vector<Point3d>& faces_normals = fs->normals;
+  std::vector<float>& faces_color = fs->colors;
+  std::vector<Point3d>& faces_center = fs->faces_center;
+  std::vector<Colorub>& face_id = fs->face_id;
+
+
+  faces.resize(nb_faces);
+  faces_normals.resize(nb_faces);
+  faces_color.resize(nb_faces);
+  faces_center.resize(nb_faces);
+  face_id.resize(nb_faces);
+
+  out << "Finding faces" << endl;
+  num = 0;
+  {
+    size_t old_num = num;
+    forall const face& f in cplx->faces():
+    {
+      float color = 4.5f / 256.0f;
+      //out << "Adding face id: " << (quint32)f.num() << " -> color = " << numToColor(f.num()) << endl;
+      addFaceTriangles(color, num, faces, faces_normals, faces_color, f);
+      for( ; old_num < num ; ++old_num)
+      {
+        faces_center[old_num] = f->pos;
+        face_id[old_num] = numToColor(f.num());
+      }
+    }
+  }
+  vvassert(num == faces.size());
+  vvassert(num == faces_normals.size());
+
+  std::vector<Point3d>& cells = cs->cells;
+  std::vector<Point3d>& cells_normals = cs->normals;
+  std::vector<Point3d>& cells_center = cs->centers;
+  std::vector<float>& cells_color = cs->colors;
+  std::vector<Point3d>& cells_center_pos = cs->cell_centers;
+  std::vector<Colorub>& cells_id = cs->cell_id;
+
+  cells.resize(nb_cells);
+  cells_normals.resize(nb_cells);
+  cells_color.resize(nb_cells);
+  cells_center.resize(nb_cells);
+  cells_center_pos.resize(cplx->nbCells());
+  cells_id.resize(nb_cells);
+
+  out << "Finding cells" << endl;
+  num = 0;
+  size_t n_cell = 0;
+  forall const cell& c in cplx->cells():
+  {
+    float col = (48.5f+float(c->color % 8))/256.0f;
+    size_t old_num = num;
+    forall const face& f in cplx->faces(c):
+    {
+      addFaceTriangles(col, num, cells, cells_normals, cells_color, f, c);
+    }
+    Colorub ccol = numToColor(c.num());
+    for( ; old_num < num ; ++old_num)
+    {
+      cells_center[old_num] = c->pos;
+      cells_id[old_num] = ccol;
+    }
+    cells_center_pos[n_cell++] = c->pos;
+  }
+  vvassert(num == cells.size());
+  vvassert(num == cells_normals.size());
+
+  out << "\n# vertices = " << pts.size()
+    << "\n# edges    = " << lines.size()
+    << "\n# faces    = " << faces.size()
+    << "\n# cells    = " << cells.size() << endl;
+
+  {
+    std::vector<Point3d>& normals = fs->faces_normals;
+    std::vector<Point3d>& centers = fs->center_faces;
+    normals.resize(2*cplx->nbFaces());
+    centers.resize(2*cplx->nbFaces());
+    num = 0;
+    forall const face& f in cplx->faces():
+    {
+      normals[num] = Point3d();
+      centers[num++] = f->pos;
+      normals[num] = f->normal;
+      centers[num++] = f->pos;
+    }
+    vvassert(num == normals.size());
+  }
+
+  /*
+   *{
+   *  std::vector<Point3d>& normals = vs->normals;
+   *  std::vector<Point3d>& starts = vs->starts;
+   *  starts.resize(2*cplx->nbVertices());
+   *  normals.resize(2*cplx->nbVertices());
+   *  num = 0;
+   *  forall const vertex& v in cplx->vertices():
+   *  {
+   *    if(!v->corner)
+   *    {
+   *      normals[num] = Point3d();
+   *      starts[num++] = v->pos;
+   *      normals[num] = v->normal;
+   *      starts[num++] = v->pos;
+   *    }
+   *  }
+   *  vvassert(num <= normals.size());
+   *  normals.resize(num);
+   *  starts.resize(num);
+   *}
+   */
+
+}
+
+Drawable::BSphere ComplexDrawer::boundingSphere() const
+{
+  return BSphere((pmin+pmax)/2, util::norm(pmax-pmin)/2);
+}
+
+void ComplexDrawer::setCellComplex(CellComplex3D *c)
+{
+  cplx = c;
+}
+
+void ComplexDrawer::reread()
+{
+  QMutexLocker lock(mutex());
+  palette->reread();
+  vs->color = palette->getColor(1);
+  es->color = palette->getColor(2);
+  fs->normalColor = palette->getColor(2);
+  palette_updated = true;
+
+  for(int i = 0 ; i < 256 ; ++i)
+    palette_texture[i] = palette->getColor(i);
+
+  util::Parms parms("view.v");
+
+  parms("View", "FaceCull", faceCull);
+  parms("View", "CellShift", cs->cellShift);
+  float ns;
+  parms("View", "NormalSize", ns);
+  parms("View", "CellCenterSize", cs->centerRadius);
+  fs->normalSize = ns;
+
+  if(firstInit)
+  {
+    firstInit = false;
+    bool show;
+    parms("View", "ShowVertices", show);
+    vs->setVisible(show);
+    parms("View", "ShowEdges", show);
+    es->setVisible(show);
+    parms("View", "ShowFaces", show);
+    fs->setVisible(show);
+    parms("View", "ShowCells", show);
+    cs->setVisible(show);
+  }
+
+  redraw();
+}
+
+QMutex* ComplexDrawer::mutex()
+{
+  return &m;
+}
+
+SelectedVertex::SelectedVertex(ccvertex vv, ComplexDrawer *parent)
+  : Drawable(parent)
+  , v(vv)
+{
+  setObjectName(QString("Vertex %1").arg(v.num()));
+}
+
+
+void SelectedVertex::drawOpaque(Viewer *)
+{
+  static const Color yellow(1,1,0,1);
+
+  glDisable(GL_LIGHTING);
+
+  glDepthRange(0, .99);
+
+  glPointSize(2*Vertices::pointSize);
+
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+
+  glColorPointer(4, GL_FLOAT, 0, &yellow);
+  glVertexPointer(3, GL_DOUBLE, 0, &v->pos);
+
+  glDrawArrays(GL_POINTS, 0, 1);
+
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glDisableClientState(GL_COLOR_ARRAY);
+
+  glDepthRange(0, 1);
+
+  glEnable(GL_LIGHTING);
+}
+
+void SelectedVertex::drawWithColors(Viewer* v)
+{
+  drawOpaque(v);
+}
+
+void SelectedVertex::postSelection(const QPoint&, Viewer*)
+{
+  ComplexDrawer* p = dynamic_cast<ComplexDrawer*>(parent());
+  if(p)
+    p->selectVertex(v.num());
+}
+
+SelectedEdge::SelectedEdge(const CellComplex3D& C, edge ee, ComplexDrawer *parent)
+  : Drawable(parent)
+  , e(ee)
+{
+  tie(vs[0], vs[1]) = C.orderedVertices(+e);
+  setObjectName(QString("Edge %1").arg(e.num()));
+}
+
+void SelectedEdge::drawOpaque(Viewer *)
+{
+  static const Color yellow[2] = { Color(1,1,0,1), Color(1,1,0,1) };
+  std::array<Point3d,2> ps;
+  ps[0] = vs[0]->pos;
+  ps[1] = vs[1]->pos;
+
+  glDepthRange(0, .99);
+  glDisable(GL_LIGHTING);
+  glLineWidth(2*Edges::lineWidth);
+
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+
+  glColorPointer(4, GL_FLOAT, 0, yellow);
+  glVertexPointer(3, GL_DOUBLE, 0, &ps[0]);
+  glDrawArrays(GL_LINES, 0, 2);
+
+  glDepthRange(0, 1);
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glDisableClientState(GL_COLOR_ARRAY);
+}
+
+void SelectedEdge::drawWithColors(Viewer* v)
+{
+  drawOpaque(v);
+}
+
+void SelectedEdge::postSelection(const QPoint&, Viewer*)
+{
+  ComplexDrawer* p = dynamic_cast<ComplexDrawer*>(parent());
+  if(p)
+    p->selectEdge(e.num());
+}
+
+
+SelectedFace::SelectedFace(const CellComplex3D& C, face ff, ComplexDrawer *parent)
+  : Drawable(parent)
+  , f(ff)
+{
+  vs = C.orderedVertices(+f);
+  setObjectName(QString("Face %1").arg(f.num()));
+}
+
+void SelectedFace::init(Viewer *, Shader *def)
+{
+  opaque = new Shader(*def);
+  opaque->setUniform("peeling", drawing::GLSLValue(false));
+  opaque->setUniform("two_sided_light", drawing::GLSLValue(true));
+  opaque->setupShaders();
+}
+
+void SelectedFace::drawOpaque(Viewer *)
+{
+  static const Color yellow(.7,.7,0,1);
+  std::vector<Point3d> ps(vs.size());
+  std::vector<Color> cs(vs.size(), yellow);
+  for(size_t i = 0 ; i < vs.size() ; ++i)
+    ps[i] = vs[i]->pos;
+
+  glEnable(GL_POLYGON_OFFSET_FILL);
+  glPolygonOffset(-1,-1);
+
+  opaque->useShaders();
+
+  glNormal3dv(f->normal.c_data());
+
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+
+  glColorPointer(4, GL_FLOAT, 0, &cs.front());
+  glVertexPointer(3, GL_DOUBLE, 0, &ps.front());
+  glDrawArrays(GL_POLYGON, 0, ps.size());
+
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glDisableClientState(GL_COLOR_ARRAY);
+  glDisable(GL_POLYGON_OFFSET_FILL);
+
+  opaque->stopUsingShaders();
+}
+
+void SelectedFace::drawWithColors(Viewer* v)
+{
+  drawOpaque(v);
+}
+
+void SelectedFace::postSelection(const QPoint&, Viewer*)
+{
+  ComplexDrawer* p = dynamic_cast<ComplexDrawer*>(parent());
+  if(p)
+    p->selectFace(f.num());
+}
+
+
+#include "drawer.moc"

@@ -1,0 +1,64 @@
+#ifndef COMPLEX_VVH
+#define COMPLEX_VVH
+
+#include "cellflips.h"
+#include "celltuples.h"
+#include "cellflipsinvariant.h"
+
+using namespace ndcomplex;
+
+enum CellType
+{
+  CT_STD    = 0x0,
+  CT_APICAL = 0x1,
+  CT_BASAL  = 0x2,
+  CT_INNER  = 0x4,
+  CT_OUTER  = 0x8
+};
+
+define CellComplex3D CellComplex3D:
+{
+
+cell:
+{
+  int id;
+  Point3d pos;
+  int round = 0, color = 0;
+  double volume;
+  bool selected = false;
+  int type = CT_STD;
+}
+
+face:
+{
+  size_t id;
+  Point3d pos;
+  Point3d normal;
+  double area;
+  bool valid = true, bottom = false, selected = false;
+}
+
+edge:
+{
+  size_t id;
+  double length = 0;
+  bool membrane = false;
+  bool crease = true;
+  bool bottom = false, selected = false;
+}
+
+vertex named ccvertex:
+{
+  size_t id;
+  Point3d pos;
+  Point3d normal;
+  cell_identity_t cell_ref = 0u;
+  bool div_point = false, valid = true, bottom = false, selected = false;
+}
+
+}
+
+typedef CellTuple<CellComplex3D> cell_tuple;
+
+#endif // COMPLEX_VVH
+

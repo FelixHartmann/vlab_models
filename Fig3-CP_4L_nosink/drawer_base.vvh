@@ -1,0 +1,193 @@
+#ifndef DRAWER_BASE_H
+#define DRAWER_BASE_H
+
+#include <util/gl.h>
+#include <drawing/drawable.h>
+#include <drawing/shader.h>
+#include <shape/quadric.h>
+#include <geometry/geometry.h>
+#include <util/palette.h>
+
+#include <QMutexLocker>
+#include <QMutex>
+#include <QSpinBox>
+#include <QDoubleSpinBox>
+#include <QWidget>
+#include <QUiLoader>
+#include <QGroupBox>
+#include <QFile>
+#include <array>
+
+using geometry::Point3d;
+using drawing::Drawable;
+using drawing::Shader;
+
+using util::Palette;
+typedef util::Palette::Color Color;
+typedef util::Color<GLubyte> Colorub;
+
+inline Colorub numToColor(size_t n)
+{
+  GLubyte r,g,b,a;
+  r = (n & 0XFF);
+  n >>= 8;
+  g = (n & 0xFF);
+  n >>= 8;
+  b = (n & 0xFF);
+  n >>= 8;
+  a = 255-(n & 0xFF);
+  return Colorub(r,g,b,a);
+}
+
+inline size_t nameToNum(size_t n)
+{
+  size_t r,g,b,a;
+  r = (n & 0XFF);
+  n >>= 8;
+  g = (n & 0xFF) << 8;
+  n >>= 8;
+  b = (n & 0xFF) << 16;
+  n >>= 8;
+  a = (255-(n & 0xFF)) << 24;
+  return r+g+b+a;
+}
+
+enum UserActiveTextures
+{
+  AT_PALETTE = Drawable::AT_USER
+};
+
+struct GenCell : public Drawable
+{
+  GenCell(QMutex *m, QObject *parent);
+
+  virtual void init(Viewer *, Shader *t, Shader * /*def*/);
+  QMutex* mutex();
+  void setPalTexId(GLuint id);
+
+  QMutex *_mutex;
+  Shader *trans;
+  GLuint palTexId;
+};
+
+class Vertices : public GenCell
+{
+  Q_OBJECT
+  public:
+  Vertices(QMutex *m, QObject *parent);
+
+  void drawWithColors(Viewer *);
+  void postSelection(const QPoint&, Viewer *v);
+  void drawOpaque(Viewer *);
+  void init(Viewer *, Shader *, Shader *def);
+  QWidget *controls();
+
+  Shader *opaque;
+  Color color;
+  static float pointSize;
+  std::vector<Point3d> pts;
+  std::vector<Colorub> vid;
+
+  public slots:
+  void changePointSize(double v);
+
+  signals:
+
+  void selectVertex(size_t num);
+};
+
+class Edges : public GenCell
+{
+  Q_OBJECT
+  public:
+  Edges(QMutex *m, QObject *parent);
+
+  void drawWithColors(Viewer *);
+  void postSelection(const QPoint&, Viewer *v);
+  void init(Viewer *, Shader *, Shader *);
+  void finalize(Viewer *);
+  void drawOpaque(Viewer *);
+  QWidget *controls();
+
+  Shader *opaque;
+  Color color;
+  static float lineWidth;
+  std::vector<Point3d> lines, centers;
+  std::vector<Colorub> edge_ids;
+
+  public slots:
+
+  void changeLineWidth(double v);
+
+signals:
+  void selectEdge(size_t num);
+};
+
+class Faces : public GenCell
+{
+  Q_OBJECT
+  public:
+
+  Color normalColor;
+  float normalThickness, normalSize;
+  float faceTransparency;
+  bool showNormals;
+  std::vector<Point3d> center_faces, faces_normals;
+  std::vector<Point3d> faces, faces_center, normals;
+  std::vector<float> colors;
+  std::vector<Colorub> face_id;
+  Shader *opaque;
+
+  Faces(QMutex *m, QObject *parent);
+  void init(Viewer *, Shader *t, Shader *def);
+  void finalize(Viewer *);
+  void drawWithColors(Viewer *);
+  void postSelection(const QPoint& , Viewer *v);
+  void drawOpaque(Viewer *v);
+  void drawTransparent(Viewer *v);
+  QWidget *controls();
+
+  public slots:
+
+  void changeNormalSize(double v);
+  void changeThickness(double v);
+  void changeTransparency(int t);
+  void changeShowNormal(bool on);
+signals:
+  void selectFace(size_t num);
+};
+
+class Cells : public GenCell
+{
+  Q_OBJECT
+  public:
+  std::vector<Point3d> cells, normals, centers;
+  std::vector<float> colors;
+  std::vector<Point3d> cell_centers;
+  std::vector<Colorub> cell_id;
+  float cellTransparency, cellShift;
+  bool showCenter;
+  static double centerRadius;
+  Shader *opaque;
+
+  Cells(QMutex *m, QObject *parent);
+  void init(Viewer *, Shader *t, Shader *def);
+  void finalize(Viewer *);
+  void drawOpaque(Viewer *v);
+  void drawTransparent(Viewer *v);
+  void drawWithColors(Viewer *);
+  void postSelection(const QPoint&, Viewer *v);
+  QWidget *controls();
+
+  public slots:
+
+  void changeTransparency(int t);
+  void changeCellShift(int t);
+  void showCellCenter(bool show);
+  void changeCellRadius(double r);
+signals:
+  void selectCell(size_t num);
+};
+
+#endif // DRAWER_BASE_H
+

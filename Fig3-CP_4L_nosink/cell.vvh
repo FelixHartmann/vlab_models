@@ -1,0 +1,973 @@
+// -*- c++ -*-
+#ifndef CELL_VVH
+#define CELL_VVH
+
+/**
+ * \file cell.vvh
+ *
+ * This files include the definition of \f$n\f$-cells and oriented objects.
+ */
+
+
+#include <util/unorderedmap.h>
+#include <util/unorderedset.h>
+#include <QtCore/QHash>
+#include <util/memory.h>
+#include <graph/vertex.h>
+#include <memory>
+#include <util/features.h>
+
+#include <QTextStream>
+#include <stdio.h>
+
+#define TEMPLATE_CELL int N, typename CellContent, typename Alloc
+#define CELL_ARGS N,CellContent,Alloc
+
+// Partial implementation of pointer_traits
+#if (defined(__GNUC__) && !__GNUC_PREREQ(4,7) && !defined(__clang__))
+namespace std
+{
+  template <typename T>
+    struct pointer_traits;
+
+  template <typename T>
+    struct pointer_traits<T*>
+    {
+      typedef T* pointer;
+      typedef T element_type;
+      typedef ptrdiff_t difference_type;
+    };
+}
+#endif
+
+namespace ndcomplex
+{
+  typedef uintptr_t cell_identity_t;
+
+  /// Output stream used for debugging statements
+  static QTextStream out(stdout);
+
+  //#define DEBUG_OUTPUT 1
+#ifdef DEBUG_OUTPUT
+#  define DEBUG_OUT(ss) out << ss
+#else
+#  define DEBUG_OUT(ss)
+#endif
+
+  struct EmptyCell { };
+
+  /**
+   * \ingroup main
+   * \class QueryType
+   * Empty type to be used in place of an empty cell when creating queries.
+   *
+   * There is an automatic conversion to an empty cell of any dimension.
+   */
+  struct QueryType { };
+
+  /**
+   * \ingroup main
+   * \enum RelativeOrientation
+   * Possible orientations
+   */
+  enum RelativeOrientation
+  {
+    neg = -1,    ///< Negative (i.e. opposite) orientation
+    invalid = 0, ///< Invalid orientation
+    pos = 1      ///< Positive (i.e. same) orientation
+  };
+
+  /**
+   * Compose orientations
+   */
+  inline RelativeOrientation operator*(const RelativeOrientation& current, const RelativeOrientation& other)
+  {
+    if(current == invalid or other == invalid)
+      return invalid;
+    else if(current == other)
+      return pos;
+    return neg;
+  }
+
+  /**
+   * Compose orientations in place
+   */
+  inline RelativeOrientation& operator*=(RelativeOrientation& current, const RelativeOrientation& other)
+  {
+    current = current * other;
+    return current;
+  }
+
+  /**
+   * Compose orientations
+   *
+   * \note This is equivalent to operator*(const RelativeOrientation&, const RelativeOrientation&)
+   */
+  inline RelativeOrientation operator/(const RelativeOrientation& current, const RelativeOrientation& other)
+  {
+    return current * other;
+  }
+
+  /**
+   * Compose orientations in place
+   */
+  inline RelativeOrientation& operator/=(RelativeOrientation& current, const RelativeOrientation& other)
+  {
+    current = current / other;
+    return current;
+  }
+
+  /**
+   * Unary positive operation on orientation.
+   *
+   * This doesn't change the orientation
+   */
+  inline RelativeOrientation operator+(const RelativeOrientation& current)
+  {
+    return current;
+  }
+
+  /**
+   * Unary negative operation on orientation
+   *
+   * This returns the opposite orientation, unless the orientation is already invalid.
+   */
+  inline RelativeOrientation operator-(const RelativeOrientation& current)
+  {
+    switch(current)
+    {
+      case pos:
+        return neg;
+      case neg:
+        return pos;
+      default:
+        return invalid;
+    }
+  }
+
+  /**
+   * \ingroup main
+   * \class OrientedObject
+   * This class compound an object and an orientation.
+   */
+  template <typename ObjectType>
+  class OrientedObject
+  {
+    public:
+      /// Underlying object
+      typedef ObjectType content_t;
+
+      enum {
+        /**
+         * Dimension of the underlying object
+         *
+         * \note This means anything oriented has a dimension!
+         */
+        N = ObjectType::N
+      };
+
+      /**
+       * Default constructor
+       *
+       * Using this constructor requires the underlying object to be default-constructible
+       */
+      OrientedObject()
+        : _object()
+        , _orient(RelativeOrientation::pos)
+        { }
+
+      /**
+       * Copy constructor
+       *
+       * Using this constructor requires the underlying object to be copy-constructible
+       */
+      OrientedObject(const OrientedObject& copy)
+        : _object(copy._object)
+        , _orient(copy._orient)
+        { }
+
+      /**
+       * Move constructor
+       *
+       * Using this constructor requires the underlying object to be move-constructible
+       */
+      OrientedObject(OrientedObject&& copy)
+        : _object(std::move(copy._object))
+        , _orient(std::move(copy._orient))
+        { }
+
+      /**
+       * Initialization constructor
+       *
+       * Using this constructor requires the underlying object to be copy-constructible
+       */
+      explicit OrientedObject(const content_t& c, RelativeOrientation o = RelativeOrientation::pos)
+        : _object(c)
+        , _orient(o)
+        { }
+
+      /**
+       * True if both the orientation is valid
+       *
+       * \note This is independant from the object itself
+       * \see OrientedObject::operator bool()
+       */
+      bool valid() const
+      {
+        return _orient != invalid;
+      }
+
+      OrientedObject& operator=(const OrientedObject& other)
+      {
+        _orient = other._orient;
+        _object = other._object;
+        return *this;
+      }
+
+      ///\name Orientation-related methods
+      //@{
+
+      /**
+       * Get the orientation
+       */
+      RelativeOrientation orientation() const { return _orient; }
+
+      /**
+       * Set the orientation
+       */
+      void setOrientation(const RelativeOrientation& o) { _orient = o; }
+
+      /**
+       * Reverse orientation
+       */
+      void reverse() { _orient = -_orient; }
+
+      /**
+       * Reverse orientation
+       */
+      OrientedObject operator-() const { return OrientedObject(_object, -_orient); }
+
+      /**
+       * Keep orientation
+       */
+      OrientedObject operator+() const { return *this; }
+
+      /**
+       * Remove orientation
+       */
+      const content_t& operator~() const { return _object; }
+
+      /**
+       * Change the orientation in place.
+       *
+       * This is equivalent to *this = OrientedObject(~*this, ro*this->orientation())
+       */
+      OrientedObject& operator*=(const RelativeOrientation& ro)
+      {
+        _orient *= ro;
+        return *this;
+      }
+
+      /**
+       * Return a new object with changed orientation
+       *
+       * This is equivalent to OrientedObject(~*this, ro*this->orientation())
+       */
+      OrientedObject operator*(const RelativeOrientation& ro) const
+      {
+        OrientedObject result(*this);
+        result *= ro;
+        return result;
+      }
+
+      //@}
+
+      ///\name Access to the underlying object
+      //@{
+
+      /**
+       * Access the content as if accessing the object itself
+       *
+       * \note Works only if \c content_t is like a pointer
+       */
+      const content_t& operator->() const { return _object; }
+
+      /**
+       * Access to the data via pointer to member
+       */
+      template <typename R, typename Element>
+        R& operator->*(R Element::* ptr)
+        {
+          return _object->*ptr;
+        }
+
+      /**
+       * Constant access to the data via pointer to member
+       */
+      template <typename R, typename Element>
+        const R& operator->*(R Element::* ptr) const
+        {
+          return _object->*ptr;
+        }
+
+      /**
+       * Check if the underlying object converts to true
+       *
+       * \note This is independent from the orientation
+       * \see OrientedObject::valid()
+       */
+      explicit operator bool() const { return bool(_object); }
+
+      //@}
+
+      /// \name Comparison operators
+      //{@
+      /// Generally speaking, first the object is compared, then the orientation. This way, same objects are together if 
+      /// sorted
+
+      bool operator<(const OrientedObject& o) const
+      {
+        if(_object < o._object) return true;
+        else if(_object > o._object) return false;
+        return _orient < o._orient;
+      }
+
+      bool operator>(const OrientedObject& o) const
+      {
+        if(_object > o._object) return true;
+        else if(_object < o._object) return false;
+        return _orient > o._orient;
+      }
+
+      bool operator<=(const OrientedObject& o) const
+      {
+        if(_object < o._object) return true;
+        else if(_object > o._object) return false;
+        return _orient <= o._orient;
+      }
+
+      bool operator>=(const OrientedObject& o) const
+      {
+        if(_object > o._object) return true;
+        else if(_object < o._object) return false;
+        return _orient >= o._orient;
+      }
+
+      bool operator==(const OrientedObject& o) const
+      {
+        return _object == o._object and _orient == o._orient;
+      }
+
+      bool operator!=(const OrientedObject& o) const
+      {
+        return _object != o._object or _orient != o._orient;
+      }
+      //@}
+
+    protected:
+      /// Underlying object
+      content_t _object;
+      /// Orientation of the object
+      RelativeOrientation _orient;;
+  };
+
+  /**
+   * Change the orientation of an object
+   * \related OrientedObject
+   */
+  template <typename CellType>
+  OrientedObject<CellType> operator*(const RelativeOrientation& ro, const OrientedObject<CellType>& oc)
+  {
+    OrientedObject<CellType> result(oc);
+    result *= ro;
+    return result;
+  }
+
+  /**
+   * \ingroup main
+   * \class Cell
+   * N-dimensional cell with properties
+   *
+   * This is a reference counted N-dimensional cell. It stored the content (by default an empty structure) and uses 
+   * allocator for memory management.
+   */
+  template <int _N, typename CellContent = EmptyCell, typename Alloc=std::allocator<CellContent> >
+    class Cell
+    {
+      public:
+        /// Type of the reference-counted content of the cell
+        typedef graph::CountedContent<CellContent> counted_content_t;
+
+      protected:
+
+        typedef typename Alloc::template rebind<counted_content_t>::other RealAlloc;
+        static RealAlloc alloc;
+
+        static size_t cell_counter;
+
+      public:
+        /**
+         * Pointer to the reference-counted content.
+         *
+         * Useful to share with other smart-pointers in VVE
+         */
+        typedef typename RealAlloc::pointer real_pointer;
+
+        /**
+         * Type of the identity of a cell
+         */
+        typedef cell_identity_t identity_t;
+        /**
+         * Type of the content, as seen from outside
+         */
+        typedef CellContent content_t;
+        /**
+         * Type of a pointer
+         */
+        typedef CellContent* pointer;
+        /**
+         * Type of a reference
+         */
+        typedef CellContent& reference;
+        /**
+         * Type of an oriented cell
+         */
+        typedef OrientedObject<Cell> oriented_cell_t;
+        /**
+         * Type of a cell
+         */
+        typedef Cell cell_t;
+
+        enum
+        {
+          N = _N ///< Dimension of the cell
+        };
+
+        /**
+         * Default constructor allocate a new element
+         */
+        Cell()
+          : _content(0)
+          {
+            try
+            {
+              this->allocate();
+            }
+            catch(std::bad_alloc&)
+            {
+              _content = 0;
+            }
+          }
+
+        /**
+         * Conversion from a query to a null cell
+         */
+        Cell(const QueryType& )
+          : _content(0)
+          {
+          }
+
+        /**
+         * Explicit construction from an identity
+         *
+         * \note If the identity correspond to a deleted cell, there is no telling what will happen!
+         */
+        explicit Cell(identity_t id)
+          : _content(reinterpret_cast<counted_content_t*>(id))
+          {
+            if(_content)
+            {
+              if(_content->count == 0)
+                _content = 0;
+              else
+              {
+                ++(_content->count);
+                DEBUG_OUT("Copy 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ") from id" << endl);
+              }
+            }
+          }
+
+        /**
+         * Copy constructor
+         */
+        Cell(const Cell& copy, bool allocate_if_null = false)
+          : _content(copy._content)
+          {
+            if(_content)
+            {
+              ++(_content->count);
+              DEBUG_OUT("Copy 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ")" << endl);
+            }
+            else if(allocate_if_null)
+            {
+              try
+              {
+                this->allocate();
+              }
+              catch(std::bad_alloc&)
+              {
+                _content = 0;
+              }
+            }
+          }
+
+        /**
+         * Move constructor
+         */
+        Cell(Cell&& move)
+          : _content(std::move(move._content))
+          {
+#ifdef DEBUG_OUTPUT
+            if(_content)
+              DEBUG_OUT("Move 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ")" << endl);
+#endif
+            move._content = 0;
+          }
+
+        /**
+         * Extract the cell from the oriented cell
+         */
+        explicit Cell(const oriented_cell_t& oc)
+          : _content((~oc)._content)
+          {
+            if(_content)
+            {
+              ++(_content->count);
+              DEBUG_OUT("Copy 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ") from oriented cell" << endl);
+            }
+          }
+
+        /**
+         * Create a null cell if id == 0.
+         *
+         * Otherwise crashes! Never call this constructor with \c id different from 0
+         */
+        explicit Cell(int id)
+          : _content(0)
+          {
+            vvassert(id == 0);
+          }
+
+        /**
+         * Create a cell from a pointer to a reference counted content
+         */
+        explicit Cell(real_pointer ptr)
+          : _content(ptr)
+          {
+            if(_content)
+            {
+              ++(_content->count);
+              DEBUG_OUT("Copy 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ")" << " from raw pointer" << endl);
+            }
+          }
+
+        /**
+         * Create a cell by moving a reference counted pointer
+         */
+        explicit Cell(real_pointer&& ptr)
+          : _content(std::move(ptr))
+          {
+            DEBUG_OUT("Move 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ")" << " from raw pointer" << endl);
+            ptr = 0;
+          }
+
+        /**
+         * Create a cell from a vertex with same content
+         */
+        explicit Cell(const graph::Vertex<CellContent>& v)
+          : _content(v.content())
+          {
+            if(_content)
+              ++(_content->count);
+            DEBUG_OUT("Get 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ")" << " from vertex" << endl);
+          }
+
+        /**
+         * Create a cell from a vertex with same content
+         */
+        explicit Cell(graph::Vertex<CellContent>&& v)
+        {
+          _content = v.acquire();
+          DEBUG_OUT("Move 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ") from vertex" << endl);
+        }
+
+        /**
+         * Create a vertex of same content from this cell
+         */
+        explicit operator graph::Vertex<CellContent>() const
+        {
+          return graph::Vertex<CellContent>(_content);
+        }
+
+        /**
+         * Destructor of the cell
+         */
+        ~Cell()
+        {
+#ifdef DEBUG_OUTPUT
+          if(_content)
+            DEBUG_OUT("Release 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << (_content->count-1) << ")" << endl);
+#endif
+          this->release();
+        }
+
+        /**
+         * \name Direct access to the reference content
+         *
+         * These methods can be used to use the content in a different reference pointer, such as graph::Vertex.
+         * Note these should be avoided though.
+         */
+        //@{
+        /**
+         * Return the reference counted content
+         */
+        real_pointer content() { return _content; }
+        /**
+         * Return the content, and reset the value in the vertex
+         *
+         * \note Doesn't decrease the reference counter!
+         */
+        real_pointer acquire() { real_pointer p = _content; _content = 0; return p; }
+        //@}
+        ///\name Content access
+        //@{
+        /**
+         * Access the content of the cell
+         */
+        pointer operator->() const { return _content; }
+        /**
+         * Get a reference on the content of the cell
+         */
+        reference operator*() const { return *_content; }
+        /**
+         * Access to the data via pointer to member
+         */
+        template <typename R>
+          R& operator->*(R CellContent::*ptr)
+          {
+            return _content->*ptr;
+          }
+        /**
+         * Constant access to the data via pointer to member
+         */
+        template <typename R>
+          const R& operator->*(R CellContent::*ptr) const
+          {
+            return _content->*ptr;
+          }
+        //@}
+
+        ///\name Cell orientation
+        //@{
+
+        /**
+         * Return a cell oriented negatively
+         */
+        oriented_cell_t operator-() const { return oriented_cell_t(*this, RelativeOrientation::neg); }
+
+        /**
+         * Return a cell oriented positively
+         */
+        oriented_cell_t operator+() const { return oriented_cell_t(*this, RelativeOrientation::pos); }
+
+        /**
+         * Return a non-oriented self
+         */
+        const Cell& operator~() const { return *this; }
+        //@}
+
+        /**
+         * Change the cell pointed to
+         */
+        Cell& operator=(const Cell& other)
+        {
+          if(_content == other._content)
+            return *this;
+          else
+            this->release();
+          _content = other._content;
+          if(_content)
+          {
+            ++(_content->count);
+            DEBUG_OUT("Copy 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ") from assignement" << endl);
+          }
+          return *this;
+        }
+
+        /**
+         * Move-assignement operator
+         */
+        Cell& operator=(Cell&& other)
+        {
+          _content = other._content;
+#ifdef DEBUG_OUTPUT
+          if(_content)
+            DEBUG_OUT("Move 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ") from assignement" << endl);
+#endif
+          other._content = 0;
+          return *this;
+        }
+
+        /**
+         * Change the cell pointed to by an id
+         *
+         * \note the behavior if the id has been freed or is of the wrong type of cell is undefined
+         */
+        Cell& operator=(const identity_t& id)
+        {
+          if((identity_t)_content == id)
+            return *this;
+          this->release();
+          _content = reinterpret_cast<counted_content_t*>(id);
+          if(_content)
+          {
+            if(_content->count == 0)
+              _content = 0;
+            else
+            {
+              ++(_content->count);
+              DEBUG_OUT("Copy 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ") from id assignement" << endl);
+            }
+          }
+          return *this;
+        }
+
+        /**
+         * \name Comparison operators
+         * @{
+         */
+        /// Compare the id of the cells
+        bool operator==(const Cell& other) const { return id() == other.id(); }
+        bool operator!=(const Cell& other) const { return id() != other.id(); }
+        bool operator<=(const Cell& other) const { return id() <= other.id(); }
+        bool operator>=(const Cell& other) const { return id() >= other.id(); }
+        bool operator<(const Cell& other) const { return id() < other.id(); }
+        bool operator>(const Cell& other) const { return id() > other.id(); }
+        //@}
+
+        /**
+         * True if the cell is null (i.e. non-allocated)
+         */
+        bool isNull() const { return _content == 0; }
+        /**
+         * Get the id of the cell
+         */
+        identity_t id() const { return (identity_t)_content; }
+        /**
+         * Get the creating number of the cell - useful for debugging
+         */
+        size_t num() const { return (_content) ? _content->num : 0; }
+
+        /**
+         * Equivalent to !isNull()
+         */
+        explicit operator bool() const { return _content; }
+
+        /**
+         * Is this an exterior cell?
+         */
+        bool isExterior() const { return *this == exterior; }
+
+        /**
+         * A null cell that can be accessed from anywhere
+         *
+         * This is useful to return a constant reference on a null cell
+         */
+        static const Cell null;
+
+        /**
+         * A cell dedicated to the exterior of cell complexes
+         */
+        static const Cell exterior;
+
+      protected:
+        mutable real_pointer _content;
+        void allocate()
+        {
+          _content = alloc.allocate(1);
+          ::new(_content) counted_content_t();
+          DEBUG_OUT("Allocating cell 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ")" << endl);
+        }
+
+        void release()
+        {
+          if(_content)
+          {
+            --(_content->count);
+            if(_content->count == 0)
+            {
+              DEBUG_OUT("Deleting cell 0x" << QString::number((uintptr_t)_content, 16) << "#" << N << " (" << _content->count << ")" << endl);
+              _content->~counted_content_t();
+              alloc.deallocate(_content,1);
+            }
+          }
+        }
+    };
+
+  /**
+   * Orient a cell
+   * \related Cell
+   */
+  template <int dim, typename CellContent>
+    OrientedObject<Cell<dim,CellContent> > operator*(const RelativeOrientation& ro, const Cell<dim,CellContent>& c)
+    {
+      return OrientedObject<Cell<dim,CellContent> >(c, ro);
+    }
+
+  /**
+   * Orient a cell
+   * \related Cell
+   */
+  template <int dim, typename CellContent>
+    OrientedObject<Cell<dim,CellContent> > operator*(const Cell<dim,CellContent>& c, const RelativeOrientation& ro)
+    {
+      return OrientedObject<Cell<dim,CellContent> >(c, ro);
+    }
+
+  template <TEMPLATE_CELL>
+    size_t Cell<CELL_ARGS>::cell_counter = 0;
+
+  template <TEMPLATE_CELL>
+    const Cell<CELL_ARGS> Cell<CELL_ARGS>::null(0);
+
+  template <TEMPLATE_CELL>
+    const Cell<CELL_ARGS> Cell<CELL_ARGS>::exterior;
+
+  template <TEMPLATE_CELL>
+    typename Cell<CELL_ARGS>::RealAlloc Cell<CELL_ARGS>::alloc;
+
+  using ::qHash;
+
+  /**
+   * instance of the qHash function for storing the cell in a Qt hash container
+   * \related Cell
+   */
+  template <TEMPLATE_CELL>
+    uint qHash(const Cell<CELL_ARGS>& v)
+    {
+      return qHash(uint(v.id() >> 4));
+    }
+
+  /**
+   * Output of a relative orientation
+   */
+  QTextStream& operator<<(QTextStream& ts, const RelativeOrientation& o);
+
+  /**
+   * Output of an oriented object
+   * \related OrientedObject
+   */
+  template <typename CellType>
+    QTextStream& operator<<(QTextStream& ts, const OrientedObject<CellType>& o)
+    {
+      ts << o.orientation() << ~o;
+      return ts;
+    }
+
+  /**
+   * Short string representation of a relative orientation (same as the full one)
+   */
+  QString shortString(const RelativeOrientation& o);
+
+  /**
+   * Short string representation of an oriented object
+   * \note This requires the underlying object to have a shortString function
+   * \related OrientedObject
+   */
+  template <typename ContentType>
+    QString shortString(const OrientedObject<ContentType>& oc)
+    {
+      return shortString(oc.orientation()) + shortString(~oc);
+    }
+
+  /**
+   * Short string representation of the bottom cell
+   * \related Cell
+   */
+  QString shortString(const Cell<-1,EmptyCell>& );
+
+  /**
+   * Short string representation of a cell
+   * \related Cell
+   */
+  template <int N, typename CellContent>
+    QString shortString(const Cell<N,CellContent>& c)
+    {
+      if(c.isNull())
+        return "*";
+      else if(c.isExterior())
+        return "E";
+      return QString::number(c.num());
+    }
+
+  /**
+   * Output of a N-cell, using the cell number and dimension to identify it
+   * \related Cell
+   */
+  template <int N, typename CellContent>
+  QTextStream& operator<<(QTextStream& ts, const Cell<N,CellContent>& c)
+  {
+    ts << "[";
+    ts << N << "|";
+    if(c.isNull())
+      ts << "*";
+    else if(c.isExterior())
+      ts << "E";
+    else
+      ts << c.num();
+    ts << "]";
+    return ts;
+  }
+
+  /**
+   * Output the bottom cell
+   * \related Cell
+   */
+  QTextStream& operator<<(QTextStream& ts, const Cell<-1,EmptyCell>& );
+
+}
+
+namespace std
+{
+    template <TEMPLATE_CELL>
+      struct hash<ndcomplex::Cell<CELL_ARGS> >
+      {
+        hash() { }
+
+        size_t operator()(const ndcomplex::Cell<CELL_ARGS>& c) const
+        {
+          static const hash<ndcomplex::cell_identity_t> h = hash<ndcomplex::cell_identity_t>();
+          return h(c.id());// >> 4);
+        }
+      };
+
+    template <typename ObjectType>
+      struct hash<ndcomplex::OrientedObject<ObjectType> >
+      {
+        hash() { }
+
+        size_t operator()(const ndcomplex::OrientedObject<ObjectType>& c) const
+        {
+          static const hash<ObjectType> h = hash<ObjectType>();
+          return h(~c)*(size_t(c.orientation()) << (8*sizeof(size_t)-2));
+        }
+      };
+
+#if (defined(__GNUC__) && !__GNUC_PREREQ(4,7) && !defined(__clang__))
+  template <int N, typename CellContent>
+    struct pointer_traits<ndcomplex::Cell<N,CellContent> >
+    {
+      typedef ndcomplex::Cell<N,CellContent> pointer;
+      typedef typename pointer::content_t element_type;
+      typedef ptrdiff_t difference_type;
+    };
+#endif
+
+#undef DEBUG_OUTPUT
+#undef DEBUG_OUT
+};
+
+#undef TEMPLATE_CELL
+
+#endif // CELL_VVH
+

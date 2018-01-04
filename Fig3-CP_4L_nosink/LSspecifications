@@ -1,0 +1,12 @@
+ignore:
+model.cpp
+model.o
+*
+always save:
+model.vve
+*
+simulator name: VVE
+model file: model.vvl
+simulator command: "Run" vverun.bat
+simulator command: "Build" vvebuild.bat
+simulator command: "Lab table shell" vveshell.bat

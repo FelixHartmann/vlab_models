@@ -1,0 +1,91 @@
+analyse_sizes.py
+FindError.ipynb
+run_many.py
+ply.h
+ply.cpp
+structure.vvh
+draw.h
+complex_drawer.h
+solvergraph_drawer.h
+shader.h
+directions.txt
+celltuples.h
+clipping.ui
+error.ui
+edges.ui
+cells.ui
+faces.ui
+vertices.ui
+color.vert
+layout_PIN.geom
+peeling_surf.geom
+peeling_surf_PIN.geom
+vvl_types.py
+Doxyfile
+.qglviewer.xml
+description.txt
+model.vvl
+model.expmap
+Makefile
+pal.map
+anim.a
+view.v
+LSspecifications
+geom.c
+geom.h
+geom2.c
+global.c
+io.c
+io.h
+mem.c
+mem.h
+merge.c
+merge.h
+poly.c
+poly.h
+poly2.c
+qhull.c
+qhull.h
+qhull_a.h
+qset.c
+qset.h
+stat.c
+stat.h
+user.c
+user.h
+CSVStream.hpp
+CSVStream.cpp
+.editorconfig
+.gglviewer.xml
+.ycm_extra_conf.py
+ignore:
+chain.h
+*.o
+model.vve
+model
+*.moc
+.*.swp
+*~
+*
+VVE:
+	run:
+		make && make run
+	build:
+		make model.vve
+	clean:
+		make clean
+
+Files:
+	model:
+		EDIT model.vvl
+	parameters:
+		EDIT view.v
+	description:
+		EDIT description.txt
+	Makefile:
+		EDIT Makefile
+
+Controls:
+	ColorPalette:
+		palette pal.map
+

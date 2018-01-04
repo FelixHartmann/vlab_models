@@ -1,0 +1,154 @@
+
+#line 1 "dirichlet.vvh"
+#include <util/forall.h>
+#include <geometry/geometry.h>
+#include <vector>
+#include <algorithm>
+
+#include <iostream>
+
+extern "C" {
+#include "qhull_a.h"
+}
+
+template <typename Fct>
+struct Defer
+{
+    Defer(Fct f)
+      : _fct(f)
+    { }
+
+    ~Defer()
+    {
+      _fct();
+    }
+
+    Fct _fct;
+};
+
+template <typename Fct>
+Defer<Fct> defer(Fct fct)
+{
+  return Defer<Fct>(fct);
+}
+
+namespace complex_factory
+{
+  using geometry::Point2d;
+  using geometry::Point3d;
+
+  template <typename Junction>
+  struct SortValuedJunctions
+  {
+    bool operator()(const std::pair<Junction,double>& j1, const std::pair<Junction,double>& j2)
+    {
+      return j1.second < j2.second;
+    }
+  };
+
+  template <typename Complex, typename Model>
+  std::vector<typename Complex::cell> dirichlet(const std::vector<Point2d>& pts, const std::vector<Point2d>& anchors, Complex& T, Model *model)
+  {
+    IMPORT_COMPLEX_TYPES(Complex);
+
+    T.clear();
+    size_t nb_pts = pts.size() + anchors.size();
+    size_t nb_cells = pts.size();
+    size_t nb_anchors = anchors.size();
+    if(nb_pts < 3)
+    {
+      return std::vector<cell>();
+    }
+
+    std::vector<cell> id_to_cell(nb_cells, cell(0));
+
+    // 1 - allocate and initialize structure for qhull
+    double *qh_pts = (double*)malloc(nb_pts*2*sizeof(double));
+    for(size_t i = 0 ; i < nb_pts ; ++i)
+    {
+      if(i < nb_anchors)
+      {
+        qh_pts[2*i] = anchors[i].x();
+        qh_pts[2*i+1] = anchors[i].y();
+      }
+      else
+      {
+        size_t j = i - nb_anchors;
+        qh_pts[2*i] = pts[j].x();
+        qh_pts[2*i+1] = pts[j].y();
+        cell c;
+        Point3d cpos(pts[j]);
+        model->setPosition(c, cpos);
+        id_to_cell[j] = c;
+      }
+    }
+
+    // 2 - launch qhull, with calculation of voronoi centers
+    char qhull_command[] = "qhull d QJ";
+    qh_new_qhull(2, nb_pts, qh_pts, true, qhull_command, NULL, stderr);
+    qh_setvoronoi_all();
+
+    auto free_qh = defer([]() { qh_freeqhull(true); });
+
+    // 3 - parse the result
+    vertexT *vertex;
+    facetT *facet, **facetp;
+
+    // 3.1 - Create all the junctions
+    std::vector<junction> id_to_jct(qh facet_id, junction(0));
+
+    if(!(qh CENTERtype) == qh_ASvoronoi)
+    {
+      std::cerr << "Problem, the facets center are not voronoi's" << std::endl;
+      id_to_cell.clear();
+      return id_to_cell;
+    }
+
+    FORALLfacets
+    {
+      if(!facet->upperdelaunay)
+      {
+        junction j;
+        Point3d jpos(facet->center[0], facet->center[1], 0);
+        model->setPosition(j, jpos);
+        id_to_jct[facet->id] = j;
+      }
+    }
+
+    FORALLvertices
+    {
+      size_t id = ((uintptr_t)vertex->point - (uintptr_t)(qh first_point))/(qh normal_size);
+      if(id >= nb_anchors)
+      {
+        size_t cid = id-nb_anchors;
+        cell c = id_to_cell[cid];
+        const Point3d& center = model->position(c);
+        std::vector<std::pair<junction,double> > vjs;
+        FOREACHfacet_(vertex->neighbors)
+        {
+          if(facet->upperdelaunay)
+          {
+            std::cerr << "  Error, the cell is on the border of the dirichlet diagram, the shape cannot be computed accurately" << std::endl;
+            id_to_cell.clear();
+            return id_to_cell;
+          }
+          junction j = id_to_jct[facet->id];
+          Point3d jpos = model->position(j) - center;
+          double a = atan2(jpos.y(), jpos.x());
+          vjs.push_back(std::make_pair(j,a));
+        }
+        std::sort(vjs.begin(), vjs.end(), SortValuedJunctions<junction>());
+        std::vector<junction> js(vjs.size(), junction(0));
+        for(size_t i = 0 ; i < vjs.size() ; ++i)
+          js[i] = vjs[i].first;
+        if(!T.addCell(c, js))
+        {
+          std::cerr << "Cannot add cell" << std::endl;
+          id_to_cell.clear();
+          return id_to_cell;
+        }
+      }
+    }
+    return id_to_cell;
+  }
+}

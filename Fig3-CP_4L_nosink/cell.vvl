@@ -1,0 +1,42 @@
+// -*- c++ -*-
+#include "cell.h"
+
+namespace ndcomplex
+{
+  QTextStream& operator<<(QTextStream& ts, const RelativeOrientation& o)
+  {
+    ts << shortString(o);
+    return ts;
+  }
+
+  QString shortString(const RelativeOrientation& o)
+  {
+    switch(o)
+    {
+      case pos:
+        return "+";
+      case neg:
+        return "-";
+      default:
+        return "!";
+    }
+  }
+
+  QTextStream& operator<<(QTextStream& ts, const Cell<-1,EmptyCell>& )
+  {
+    ts << "[_]";
+    return ts;
+  }
+
+  QString shortString(const Cell<-1,EmptyCell>& )
+  {
+    return "_";
+  }
+
+  std::unordered_set<cell_identity_t>& known_cells()
+  {
+    static std::unordered_set<cell_identity_t> cells = std::unordered_set<cell_identity_t>();
+    return cells;
+  }
+
+}

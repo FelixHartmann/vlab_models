@@ -1,0 +1,659 @@
+#ifndef CELLFLIPSINVARIANT_VVH
+#define CELLFLIPSINVARIANT_VVH
+
+#include "cellflips.h"
+
+namespace ndcomplex
+{
+#define TEMPLATE_CELL_COMPLEX typename VertexContent, typename... CellContents
+#define CELL_COMPLEX_ARGS VertexContent, CellContents...
+  /**
+   * \ingroup utility
+   * \class InvariantReport
+   * This class contains the printable report of all the problems found in a cell complex
+   */
+  struct InvariantReport
+  {
+    /// Enumeration of the invariants that may be violated
+    enum INVARIANT
+      {
+        TOP_FLIP,
+        BOTTOM_FLIP,
+        CELL_FLIP_EXISTENCE,
+        FACE_FLIP_EXISTENCE,
+        JOINT_FLIP_EXISTENCE,
+        DESCENDING_CONSISTENCY,
+        WEAK_ASCENDING_CONSISTENCY,
+        STRONG_ASCENDING_CONSISTENCY,
+        NEIGHBORHOOD_CONSISTENCY,
+        CELL_CONTINUITY,
+        FLIP_ORIENTATION_POS,
+        FLIP_ORIENTATION_NEG
+      };
+
+    /// Turn the invariant into human readable text
+    static QString invariantToText(INVARIANT inv)
+    {
+      switch(inv)
+        {
+        case TOP_FLIP:
+          return "Top flip has a cell different from the top-cell on cell position";
+        case BOTTOM_FLIP:
+          return "Bottom flip has a cell different from the bottom-cell on cell position";
+        case CELL_FLIP_EXISTENCE:
+          return "The cell is never in cell position";
+        case FACE_FLIP_EXISTENCE:
+          return "The cell is never in face position";
+        case JOINT_FLIP_EXISTENCE:
+          return "The cell is never in joint position";
+        case DESCENDING_CONSISTENCY:
+          return "The cells are in face/joint position, but never in cell/face position";
+        case WEAK_ASCENDING_CONSISTENCY:
+          return "The cells are in cell/face and face/joint position, but never in cell/face/joint position";
+        case STRONG_ASCENDING_CONSISTENCY:
+          return "The cells are in cell/face position, but never in face/joint position";
+        case CELL_CONTINUITY:
+          return "The layer of the cell is not connected";
+        case FLIP_ORIENTATION_POS:
+          return "Oriented flip indicate cell/face and face/joint must have same orientation";
+        case FLIP_ORIENTATION_NEG:
+          return "Oriented flip indicate cell/face and face/joint must have different orientation";
+        case NEIGHBORHOOD_CONSISTENCY:
+          return "The two cells are neighbor and co-neighbor, but not adjacent.";
+        default:
+          return "Unknown error";
+        }
+    }
+
+    /**
+     * \class Cell
+     * Abstract representation of a cell by its dimension and number.
+     */
+    struct Cell
+    {
+      typedef size_t size_type;
+      int dim; ///< Dimension of the cell
+      size_type num; ///< Number of the cell
+
+      Cell() = default;
+      Cell(int d, size_type n) : dim(d), num(n) { }
+      Cell(const Cell&) = default;
+      Cell(Cell&&) = default;
+      Cell& operator=(const Cell&) = default;
+      Cell& operator=(Cell&&) = default;
+
+      template <int N1, typename Content>
+      Cell(const ndcomplex::Cell<N1,Content>& c)
+        : dim(N1)
+        , num(c.num())
+      {
+      }
+
+      bool operator<(const Cell& other) const
+      {
+        if(dim < other.dim) return true;
+        else if(other.dim < dim) return false;
+        return num < other.num;
+      }
+
+      bool operator==(const Cell& other) const
+      {
+        return dim == other.dim and num == other.num;
+      }
+    };
+
+    /**
+     * \class Error
+     * Define one error in the cell complex
+     */
+    struct Error
+    {
+      INVARIANT inv; ///< Type of error
+      std::vector<InvariantReport::Cell> cells; ///< Cells related to the error
+    };
+
+    std::list<Error> errors; ///< List of errors in the report
+
+    /// Function used to add an error
+    void addError(INVARIANT inv, const std::vector<Cell>& cs)
+    {
+      Error err = { inv, cs };
+      errors.push_back(err);
+    }
+
+    /// Function used to add an error
+    template <typename C>
+    void addError(INVARIANT inv, const std::initializer_list<C>& cs)
+    {
+      addError(inv, std::vector<Cell>(begin(cs), end(cs)));
+    }
+
+    /// Returns true if the report contains no error
+    explicit operator bool() const
+    {
+      return errors.empty();
+    }
+
+  };
+
+  /**
+   * Print one abstract cell
+   * \relates InvariantReport::Cell
+   */
+  QTextStream& operator<<(QTextStream& ss, const InvariantReport::Cell& c);
+
+  /**
+   * Print one error
+   * \relates InvariantReport::Error
+   */
+  QTextStream& operator<<(QTextStream& ss, const InvariantReport::Error& err);
+
+  /**
+   * Print the whole report on the text stream
+   * \relates InvariantReport
+   */
+  QTextStream& operator<<(QTextStream& ss, const InvariantReport& report);
+
+
+  template <int N1, typename CellComplex>
+  CellSet<CELL_TYPE(N1,CellComplex)> _getCellsAsFace(const CellComplex& C, const true_type&)
+  {
+    auto r = get_layer<N1+1>(C).faces();
+    return CellSet<CELL_TYPE(N1,CellComplex)>(begin(r), end(r));
+  }
+
+  template <int N1, typename CellComplex>
+  CellSet<CELL_TYPE(N1,CellComplex)> _getCellsAsFace(const CellComplex& , const false_type&)
+  {
+    return CellSet<CELL_TYPE(N1,CellComplex)>();
+  }
+
+  template <int N1, typename CellComplex>
+  CellSet<CELL_TYPE(N1,CellComplex)> _getCellsAsFace(const CellComplex& C)
+  {
+    return _getCellsAsFace<N1>(C, typename test_type<(N1<CellComplex::N)>::type());
+  }
+
+
+  template <int N1, typename CellComplex>
+  CellSet<CELL_TYPE(N1,CellComplex)> _getCellsAsJoint(const CellComplex& C, const true_type&)
+  {
+    auto r = get_layer<N1+2>(C).joints();
+    return CellSet<CELL_TYPE(N1,CellComplex)>(begin(r), end(r));
+  }
+
+  template <int N1, typename CellComplex>
+  CellSet<CELL_TYPE(N1,CellComplex)> _getCellsAsJoint(const CellComplex& , const false_type&)
+  {
+    return CellSet<CELL_TYPE(N1,CellComplex)>();
+  }
+
+  template <int N1, typename CellComplex>
+  CellSet<CELL_TYPE(N1,CellComplex)> _getCellsAsJoint(const CellComplex& C)
+  {
+    return _getCellsAsJoint<N1>(C, typename test_type<(N1<CellComplex::N-1)>::type());
+  }
+
+  template <int N1, typename CellComplex>
+  CellSet<CELL_TYPE(N1,CellComplex)> _getCellsAsCell(const CellComplex& C)
+  {
+    auto r = get_layer<N1>(C).cells();
+    return CellSet<CELL_TYPE(N1,CellComplex)>(begin(r), end(r));
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkCellFlip(const CellComplex& C, InvariantReport& report);
+
+  template <int N1, typename CellComplex>
+  void _checkCellFlip(const CellComplex& C, InvariantReport& report, const true_type& )
+  {
+    typedef typename CellComplex::template ncell_t<N1>::cell_t l_cell_t;
+    CellSet<l_cell_t> cs;
+    CellSet<l_cell_t> as_cell = _getCellsAsCell<N1>(C);
+    CellSet<l_cell_t> as_face = _getCellsAsFace<N1>(C);
+    CellSet<l_cell_t> as_joint = _getCellsAsJoint<N1>(C);
+    forall const l_cell_t& c in as_face:
+      {
+        if(!as_cell.contains(c)) cs.insert(c);
+      }
+    forall const l_cell_t& c in as_joint:
+      {
+        if(!as_cell.contains(c)) cs.insert(c);
+      }
+    if(!cs.empty())
+      report.addError(InvariantReport::CELL_FLIP_EXISTENCE, std::vector<InvariantReport::Cell>(begin(cs), end(cs)));
+    _checkCellFlip<N1-1>(C, report);
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkCellFlip(const CellComplex& , InvariantReport& , const false_type& )
+  {
+    // Nothing to do here
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkCellFlip(const CellComplex& C, InvariantReport& report)
+  {
+    _checkCellFlip<N1>(C, report, typename test_type<(N1>0)>::type());
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkFaceFlip(const CellComplex& C, InvariantReport& report);
+
+  template <int N1, typename CellComplex>
+  void _checkFaceFlip(const CellComplex& C, InvariantReport& report, const true_type& )
+  {
+    typedef typename CellComplex::template ncell_t<N1>::cell_t l_cell_t;
+    CellSet<l_cell_t> cs;
+    QueryType Q;
+    forall l_cell_t c in C.template cells<N1>():
+      {
+        if(C.match(Q,c,Q,Q).empty())
+          cs.insert(c);
+      }
+    if(!cs.empty())
+      report.addError(InvariantReport::FACE_FLIP_EXISTENCE, std::vector<InvariantReport::Cell>(begin(cs), end(cs)));
+    _checkFaceFlip<N1-1>(C, report);
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkFaceFlip(const CellComplex& , InvariantReport& , const false_type& )
+  {
+    // Nothing to do here
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkFaceFlip(const CellComplex& C, InvariantReport& report)
+  {
+    _checkFaceFlip<N1>(C, report, typename test_type<(N1 > 0)>::type());
+  }
+
+
+  template <int N1, typename CellComplex>
+  void _checkJointFlip(const CellComplex& C, InvariantReport& report);
+
+  template <int N1, typename CellComplex>
+  void _checkJointFlip(const CellComplex& C, InvariantReport& report, const true_type& )
+  {
+    typedef typename CellComplex::template ncell_t<N1>::cell_t l_cell_t;
+    CellSet<l_cell_t> cs;
+    QueryType Q;
+    forall l_cell_t c in C.template cells<N1>():
+      {
+        if(C.match(Q,Q,Q,c).empty())
+          cs.insert(c);
+      }
+    if(!cs.empty())
+      report.addError(InvariantReport::JOINT_FLIP_EXISTENCE, std::vector<InvariantReport::Cell>(begin(cs), end(cs)));
+    _checkJointFlip<N1-1>(C, report);
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkJointFlip(const CellComplex& , InvariantReport& , const false_type& )
+  {
+    // Nothing to do here
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkJointFlip(const CellComplex& C, InvariantReport& report)
+  {
+    _checkJointFlip<N1>(C, report, typename test_type<(N1 > 0)>::type());
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkDescending(const CellComplex& C, InvariantReport& report);
+
+  template <int N1, typename CellComplex>
+  void _checkDescending(const CellComplex& C, InvariantReport& report, const true_type& )
+  {
+    typedef typename CellComplex::template ncell_t<N1-1>::cell_t l_face_t;
+    typedef typename CellComplex::template ncell_t<N1-2>::cell_t l_joint_t;
+    QueryType Q;
+    forall const l_face_t& f in C.template cells<N1-1>():
+      {
+        CellSet<l_joint_t> js;
+        forall auto pf in C.match(Q, f, Q, Q):
+          js.insert(pf->joint);
+        forall const l_joint_t& j in js:
+          {
+            if(C.match(f, j, Q, Q).empty())
+              report.addError(InvariantReport::DESCENDING_CONSISTENCY,
+                              {f, j});
+          }
+      }
+    _checkDescending<N1-1>(C,report);
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkDescending(const CellComplex& , InvariantReport& , const false_type& )
+  {
+    // Nothing to do!
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkDescending(const CellComplex& C, InvariantReport& report)
+  {
+    _checkDescending<N1>(C, report, typename test_type<(N1>1)>::type());
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkWeakAscending(const CellComplex& C, InvariantReport& report);
+
+  template <int N1, typename CellComplex>
+  void _checkWeakAscending(const CellComplex& C, InvariantReport& report, const true_type&)
+  {
+    typedef typename CellComplex::template ncell_t<N1>::cell_t l_cell_t;
+    typedef typename CellComplex::template ncell_t<N1-1>::cell_t l_face_t;
+    typedef typename CellComplex::template ncell_t<N1-2>::cell_t l_joint_t;
+
+    QueryType Q;
+
+    forall const l_cell_t& c in C.template cells<N1>():
+      forall const l_face_t& f in C.faces(c):
+      {
+        forall const l_joint_t& j in C.faces(f):
+          if(C.match(c,Q,Q,j).empty())
+            {
+              report.addError(InvariantReport::WEAK_ASCENDING_CONSISTENCY,
+                              {c, f, j});
+            }
+      }
+
+    _checkWeakAscending<N1-1>(C, report);
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkWeakAscending(const CellComplex& , InvariantReport& , const false_type&)
+  {
+    // Nothing to do
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkWeakAscending(const CellComplex& C, InvariantReport& report)
+  {
+    _checkWeakAscending<N1>(C, report, typename test_type<(N1>0)>::type());
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkStrongAscending(const CellComplex& C, InvariantReport& report);
+
+  template <int N1, typename CellComplex>
+  void _checkStrongAscending(const CellComplex& C, InvariantReport& report, const true_type&)
+  {
+    typedef typename CellComplex::template ncell_t<N1>::cell_t l_cell_t;
+    QueryType Q;
+    forall const l_cell_t& c in C.template cells<N1>():
+      {
+        forall auto pf in C.match(c, Q, Q, Q):
+          {
+            if(C.match(Q,c,Q,pf->face1).empty())
+              {
+                report.addError(InvariantReport::STRONG_ASCENDING_CONSISTENCY,
+                                {c, pf->face1});
+              }
+            if(C.match(Q,c,Q,pf->face2).empty())
+              {
+                report.addError(InvariantReport::STRONG_ASCENDING_CONSISTENCY,
+                                {c, pf->face2});
+              }
+          }
+      }
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkStrongAscending(const CellComplex& , InvariantReport& , const false_type&)
+  {
+    // Nothing to do
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkStrongAscending(const CellComplex& C, InvariantReport& report)
+  {
+    _checkStrongAscending<N1>(C, report, typename test_type<(N1>0)>::type());
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkFlipOrientation(const CellComplex& C, InvariantReport& report);
+
+  template <int N1, typename CellComplex>
+  void _checkFlipOrientation(const CellComplex& C, InvariantReport& report, const true_type&)
+  {
+    typedef typename CellComplex::template ncell_t<N1>::cell_t l_cell_t;
+    QueryType Q;
+    forall const l_cell_t& c in C.template cells<N1>():
+      {
+        forall auto pf in C.match(c, Q, Q, Q):
+          {
+            if(C.relativeOrientation(c, pf->face1) != C.relativeOrientation(pf->face1, pf->joint))
+              report.addError(InvariantReport::FLIP_ORIENTATION_POS, {c, pf->face1, pf->joint});
+            if(C.relativeOrientation(c, pf->face2) == C.relativeOrientation(pf->face2, pf->joint))
+              report.addError(InvariantReport::FLIP_ORIENTATION_NEG, {c, pf->face2, pf->joint});
+          }
+      }
+    _checkFlipOrientation<N1-1>(C, report);
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkFlipOrientation(const CellComplex& , InvariantReport& , const false_type&)
+  {
+    // Nothing to do
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkFlipOrientation(const CellComplex& C, InvariantReport& report)
+  {
+    _checkFlipOrientation<N1>(C, report, typename test_type<(N1>0)>::type());
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkCellsContinuity(const CellComplex& C, InvariantReport& report);
+
+  template <int N1, typename CellComplex>
+  void _checkCellsContinuity(const CellComplex& C, InvariantReport& report, const true_type&)
+  {
+    typedef typename CellComplex::template ncell_t<N1>::cell_t l_cell_t;
+    typedef typename CellComplex::template ncell_t<N1-1>::cell_t l_face_t;
+    typedef typename CellComplex::size_type size_type;
+    QueryType Q;
+    forall const l_cell_t& c in C.template cells<N1>():
+      {
+        auto m = C.match(c, Q, Q, Q);
+        std::vector<size_type> group_equiv;
+        group_equiv.reserve(m.size());
+        std::unordered_map<l_face_t,size_type> groups;
+        forall auto pf in m:
+          {
+            size_type g1 = group_equiv.size(), g2 = group_equiv.size();
+            auto found1 = groups.find(pf->face1);
+            auto found2 = groups.find(pf->face2);
+            if(found1 != groups.end())
+              {
+                g1 = found1->second;
+                size_type prev = g1;
+                do {
+                  prev = g1;
+                  g1 = group_equiv[prev];
+                } while(g1 != prev);
+              }
+            else
+              found1 = groups.insert(std::make_pair(pf->face1, g1)).first;
+            if(found2 != groups.end())
+              {
+                g2 = found2->second;
+                size_type prev = g2;
+                do {
+                  prev = g2;
+                  g2 = group_equiv[prev];
+                } while(g2 != prev);
+              }
+            else
+              found2 = groups.insert(std::make_pair(pf->face2, g2)).first;
+            size_type g = std::min(g1, g2);
+            if(g == group_equiv.size())
+              group_equiv.push_back(g);
+            else if(g < g1)
+              group_equiv[g1] = g;
+            else if(g < g2)
+              group_equiv[g2] = g;
+            found1->second = found2->second = g;
+          }
+        // Now, consolidate the equivalence classes
+        for(size_type i = 0 ; i < group_equiv.size() ; ++i)
+          {
+            size_type g = group_equiv[group_equiv[i]];
+            if(g > 0)
+              {
+                report.addError(InvariantReport::CELL_CONTINUITY, {c});
+                break;
+              }
+            group_equiv[i] = g;
+          }
+      }
+    _checkCellsContinuity<N1-1>(C, report);
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkCellsContinuity(const CellComplex& , InvariantReport&, const false_type&)
+  {
+    // Nothing to do
+  }
+
+
+  template <int N1, typename CellComplex>
+  void _checkCellsContinuity(const CellComplex& C, InvariantReport& report)
+  {
+    _checkCellsContinuity<N1>(C, report, typename test_type<(N1>1)>::type());
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkNeighborhoods(const CellComplex& C, InvariantReport& report);
+
+  template <int N1, typename CellComplex>
+  void _checkNeighborhoods(const CellComplex& C, InvariantReport& report, const true_type&)
+  {
+    typedef typename CellComplex::template ncell_t<N1>::cell_t l_cell_t;
+    QueryType Q;
+    forall const l_cell_t& c in C.template cells<N1>():
+      {
+        CellSet<l_cell_t> ns = C.template neighbors<N1>(c);
+        CellSet<l_cell_t> cs = C.template coneighbors<N1>(c);
+        // Keep neighbors that are also co-neighbors
+        ns &= cs;
+        forall const l_cell_t& c1 in ns:
+          if(C.match(Q,c,c1,Q).empty())
+            {
+              report.addError(InvariantReport::NEIGHBORHOOD_CONSISTENCY, {c,c1});
+            }
+      }
+    _checkNeighborhoods<N1-1>(C, report);
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkNeighborhoods(const CellComplex& , InvariantReport& , const false_type&)
+  {
+    // Nothing to do
+  }
+
+  template <int N1, typename CellComplex>
+  void _checkNeighborhoods(const CellComplex& C, InvariantReport& report)
+  {
+    _checkNeighborhoods<N1>(C, report, typename test_type<(N1>0)>::type());
+  }
+
+  /**
+   * Check the weak invariants of the cell complex
+   */
+  template <TEMPLATE_CELL_COMPLEX>
+  InvariantReport checkWeakInvariants(const CellComplex<CELL_COMPLEX_ARGS>& C)
+  {
+    InvariantReport report;
+
+    typedef CellComplex<CELL_COMPLEX_ARGS> cell_complex_t;
+    typedef typename cell_complex_t::edge_t edge_t;
+    typedef typename cell_complex_t::face_t face_t;
+
+    static const int N = cell_complex_t::N;
+
+    QueryType Q;
+    std::set<InvariantReport::Cell> cs;
+
+    // bottom-flip invariant
+    cs.clear();
+    forall edge_t e in C.edges():
+      {
+        forall auto pf in C.match(e,Q,Q,Q):
+          {
+            if(pf->joint != C._)
+              {
+                cs.insert(pf->joint);
+              }
+          }
+      }
+    if(!cs.empty())
+      report.addError(InvariantReport::BOTTOM_FLIP, std::vector<InvariantReport::Cell>(cs.begin(), cs.end()));
+
+    // top-flip invariant
+    cs.clear();
+    forall face_t f in C.faces():
+      {
+        forall auto pf in C.match(Q,Q,Q,f):
+          {
+            if(pf->cell != C.T)
+              {
+                InvariantReport::Cell c = {N+1, pf->cell.num() };
+                cs.insert(c);
+              }
+          }
+      }
+    if(!cs.empty())
+      report.addError(InvariantReport::TOP_FLIP, std::vector<InvariantReport::Cell>(cs.begin(), cs.end()));
+
+    // existence of cell flip
+    _checkCellFlip<N>(C, report);
+
+    // Descending consistency
+    _checkDescending<N+1>(C, report);
+
+    // Weak ascending consistency
+    _checkWeakAscending<N>(C, report);
+
+    // Neighborhoods consistency
+    _checkNeighborhoods<N>(C, report);
+
+    // Cell continuity
+    _checkCellsContinuity<N>(C, report);
+
+    // Flip orientation
+    _checkFlipOrientation<N+1>(C, report);
+
+    return report;
+  }
+
+  /**
+   * Check the full invariants of the cell complex
+   */
+  template <TEMPLATE_CELL_COMPLEX>
+  InvariantReport checkCellComplex(const CellComplex<CELL_COMPLEX_ARGS>& C)
+  {
+    typedef CellComplex<CELL_COMPLEX_ARGS> cell_complex_t;
+    InvariantReport report = checkWeakInvariants(C);
+
+    static const int N = cell_complex_t::N;
+
+    // existence of face flip
+    _checkFaceFlip<N-1>(C, report);
+
+    // existence of joint flip
+    _checkJointFlip<N-2>(C, report);
+
+    // String ascending consistency
+    _checkStrongAscending<N-1>(C, report);
+
+    return report;
+  }
+#undef TEMPLATE_CELL_COMPLEX
+#undef CELL_COMPLEX_ARGS
+}
+
+#endif // CELLFLIPSINVARIANT_VVH
+
